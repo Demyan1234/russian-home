@@ -1,0 +1,16 @@
+.rating-stars {
+    display: inline-flex;
+    gap: 2px;
+}
+
+.star-btn {
+    transition: color 0.2s ease;
+}
+
+.star-btn.readonly {
+    cursor: default;
+}
+
+.star-btn:not(.readonly):hover {
+    transform: scale(1.1);
+}

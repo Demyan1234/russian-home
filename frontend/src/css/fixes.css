@@ -1,0 +1,73 @@
+.catalog-filters {
+    position: relative;
+    z-index: 1000;
+}
+
+.sidebar-filter {
+    z-index: 1000 !important;
+}
+
+.dropdown-menu {
+    z-index: 1100 !important;
+}
+
+.navbar-dropdown {
+    z-index: 1200 !important;
+}
+
+.modal-backdrop {
+    z-index: 1050 !important;
+}
+
+.modal {
+    z-index: 1060 !important;
+}
+
+
+.filter-section {
+    transform: translateZ(0);
+    will-change: transform;
+}
+
+
+.filter-transition {
+    transition: all 0.2s ease-in-out;
+}
+
+
+.filter-container {
+    position: relative;
+    z-index: 100;
+}
+
+.navbar-container {
+    position: relative;
+    z-index: 110;
+}
+
+
+.product-filters {
+    position: relative;
+    z-index: 50;
+}
+
+
+.navbar-container {
+    position: relative;
+    z-index: 1000 !important;
+}
+
+.category-bar {
+    position: relative;
+    z-index: 999 !important;
+}
+
+.sidebar-filter {
+    position: relative;
+    z-index: 10 !important;
+}
+
+.dropdown-menu {
+    z-index: 1050 !important;
+}
+
