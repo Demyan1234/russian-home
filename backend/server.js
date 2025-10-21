@@ -2144,7 +2144,6 @@ app.get('/api/products', async (req, res) => {
     }
 });
 
-// Этот маршрут должен быть в server.js (проверьте его наличие)
 app.get('/api/products/:id', async (req, res) => {
     try {
         const connection = await pool.getConnection();
@@ -2232,8 +2231,7 @@ app.put('/api/admin/products/:id', authenticateToken, requireAdmin, upload.array
     }
 });
 
-// Добавьте этот маршрут в server.js (можно после GET /api/products/:id)
-// Добавьте после других GET маршрутов для товаров
+
 app.get('/api/admin/products/:id/check', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const { id } = req.params;
@@ -2697,16 +2695,12 @@ app.get('/api/admin/categories', authenticateToken, requireAdmin, async (req, re
     }
 });
 
-// Добавьте этот код в server.js после других POST-маршрутов для админа
-// ДОБАВЬТЕ ЭТОТ КОД в server.js после других POST маршрутов (примерно после app.post('/api/admin/categories'))
-
-// Добавьте после других POST маршрутов
 app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('images', 10), async (req, res) => {
     let connection;
     try {
-        console.log('🆕 CREATE PRODUCT REQUEST received');
-        console.log('📁 Files:', req.files?.length || 0);
-        console.log('📦 Body fields:', Object.keys(req.body));
+        console.log('CREATE PRODUCT REQUEST received');
+        console.log('Files:', req.files?.length || 0);
+        console.log('Body fields:', Object.keys(req.body));
 
         const { 
             name, 
@@ -2719,7 +2713,6 @@ app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('i
             color
         } = req.body;
 
-        // Валидация
         if (!name || !price) {
             return res.status(400).json({ 
                 success: false,
@@ -2729,7 +2722,6 @@ app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('i
 
         connection = await getConnection();
 
-        // Проверяем категорию если указана
         if (category_id) {
             const [categories] = await connection.execute(
                 'SELECT id FROM categories WHERE id = ?', 
@@ -2743,7 +2735,6 @@ app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('i
             }
         }
 
-        // Проверяем бренд если указан
         if (brand_id) {
             const [brands] = await connection.execute(
                 'SELECT id FROM brands WHERE id = ?', 
@@ -2757,13 +2748,11 @@ app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('i
             }
         }
 
-        // Обрабатываем изображения
         let images = [];
         if (req.files && req.files.length > 0) {
             images = req.files.map(file => `/uploads/${file.filename}`);
         }
 
-        // Создаем товар
         const [result] = await connection.execute(
             `INSERT INTO products 
             (name, description, price, category_id, brand_id, stock_quantity, material, color, images) 
@@ -2783,7 +2772,6 @@ app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('i
 
         const productId = result.insertId;
 
-        // Получаем созданный товар
         const [products] = await connection.execute(`
             SELECT p.*, c.name as category_name, b.name as brand_name 
             FROM products p 
@@ -2797,7 +2785,7 @@ app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('i
             images: products[0].images ? JSON.parse(products[0].images) : []
         };
 
-        console.log('✅ Product created successfully:', { id: productId, name: product.name });
+        console.log(' Product created successfully:', { id: productId, name: product.name });
 
         res.json({
             success: true,
@@ -2806,7 +2794,7 @@ app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('i
         });
 
     } catch (error) {
-        console.error('❌ CREATE PRODUCT ERROR:', error);
+        console.error(' CREATE PRODUCT ERROR:', error);
         res.status(500).json({ 
             success: false,
             error: 'Ошибка создания товара: ' + error.message
@@ -2816,7 +2804,6 @@ app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('i
     }
 });
 
-// Добавьте для отладки
 app.get('/api/admin/diagnostics/products', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const connection = await getConnection();

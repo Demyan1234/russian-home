@@ -209,13 +209,12 @@ export const createProduct = async (formData) => {
             throw new Error('Требуется авторизация');
         }
 
-        console.log('🔄 Creating product...');
+        console.log(' Creating product...');
 
         const response = await fetch(`/api/admin/products`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${token}`,
-                // НЕ добавляем Content-Type для FormData - браузер сам установит
             },
             body: formData
         });
@@ -227,27 +226,26 @@ export const createProduct = async (formData) => {
             
             try {
                 const errorText = await response.text();
-                console.log('📄 Error response text:', errorText);
+                console.log(' Error response text:', errorText);
                 
                 if (errorText) {
                     const errorData = JSON.parse(errorText);
                     errorMessage = errorData.error || errorData.message || errorText;
                 }
             } catch (parseError) {
-                console.log('❌ Cannot parse error response:', parseError);
+                console.log(' Cannot parse error response:', parseError);
             }
             
             throw new Error(errorMessage);
         }
 
         const result = await response.json();
-        console.log('✅ Create product success:', result);
+        console.log(' Create product success:', result);
         return result;
 
     } catch (error) {
-        console.error('❌ Create Product Error:', error);
+        console.error(' Create Product Error:', error);
         
-        // Проверяем различные типы ошибок
         if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
             throw new Error('Не удалось подключиться к серверу. Проверьте запущен ли бэкенд на порту 3000.');
         }

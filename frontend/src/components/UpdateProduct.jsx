@@ -74,14 +74,12 @@ const loadExistingData = async () => {
     try {
         setLoading(true);
         
-        // Затем загружаем данные
         const [categoriesData, brandsData, productData] = await Promise.allSettled([
             fetchCategories(),
             fetchBrands(),
             fetchOneProduct(id)
         ]);
 
-        // Обрабатываем результаты
         let categories = [];
         let brands = [];
 
@@ -101,14 +99,12 @@ const loadExistingData = async () => {
 
         if (productData.status === 'fulfilled') {
             const product = productData.value;
-            console.log('✅ Loaded product:', product);
+            console.log(' Loaded product:', product);
             
-            // Заполняем форму данными товара
             setName(product.name || '');
             setPrice(product.price || '');
             setDescription(product.description || '');
             
-            // Находим названия категории и бренда по их ID
             const categoryName = product.category_id ? 
                 categories.find(c => c.id === product.category_id)?.name || '' 
                 : '';
@@ -124,19 +120,19 @@ const loadExistingData = async () => {
             setExistingImages(product.images || []);
             setMainImageIndex(0);
             
-            console.log('📝 Form filled:', { 
+            console.log(' Form filled:', { 
                 categoryName, 
                 brandName, 
                 material: product.material,
                 color: product.color 
             });
         } else {
-            console.error('❌ Product load error:', productData.reason);
+            console.error(' Product load error:', productData.reason);
             setError('Не удалось загрузить данные товара. Проверьте ID товара.');
         }
 
     } catch (error) {
-        console.error('❌ Load existing data error:', error);
+        console.error(' Load existing data error:', error);
         setError('Ошибка загрузки данных: ' + error.message);
     } finally {
         setLoading(false);

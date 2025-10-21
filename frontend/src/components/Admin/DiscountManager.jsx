@@ -269,7 +269,7 @@ const DiscountManager = observer(() => {
             {/* ПАНЕЛЬ УПРАВЛЕНИЯ */}
             <Card className="mb-4">
                 <Card.Header>
-                    <h5 className="mb-0"> Управление скидками и статусами</h5>
+                    <h5 className="mb-0"> Управление </h5>
                 </Card.Header>
                 <Card.Body>
                     <Row className="align-items-center">
@@ -299,23 +299,6 @@ const DiscountManager = observer(() => {
                                     Сбросить скидки
                                 </Button>
                             </div>
-                        </Col>
-                        
-                        <Col md={6}>
-                            <InputGroup>
-                                <Form.Control
-                                    type="text"
-                                    placeholder="Поиск товаров..."
-                                    value={searchTerm}
-                                    onChange={(e) => setSearchTerm(e.target.value)}
-                                />
-                                <Button 
-                                    variant="outline-secondary" 
-                                    onClick={() => setSearchTerm('')}
-                                >
-                                    ✕
-                                </Button>
-                            </InputGroup>
                         </Col>
                     </Row>
                 </Card.Body>
