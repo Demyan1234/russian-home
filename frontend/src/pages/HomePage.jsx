@@ -167,27 +167,6 @@ const HomePage = observer(() => {
                             </Row>
                         </section>
                     )}
-
-                    {/* Бренды */}
-                    {homepageData.brands && homepageData.brands.length > 0 && (
-                        <section className="mb-5">
-                            <h2> Популярные бренды</h2>
-                            <Row>
-                                {homepageData.brands.map(brand => (
-                                    <Col lg={3} md={4} key={brand.id} className="mb-3">
-                                        <Card className="text-center">
-                                            <Card.Body>
-                                                <Card.Title>{brand.name}</Card.Title>
-                                                <Card.Text className="text-muted small">
-                                                    {brand.description}
-                                                </Card.Text>
-                                            </Card.Body>
-                                        </Card>
-                                    </Col>
-                                ))}
-                            </Row>
-                        </section>
-                    )}
                 </>
             )}
         </Container>

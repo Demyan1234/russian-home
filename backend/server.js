@@ -39,10 +39,6 @@ process.emit = function (name, data, ...args) {
     return originalEmit.apply(process, arguments);
 };
 
-console.log(' Yookassa config check:', {
-    shopId: process.env.YOOKASSA_SHOP_ID ? 'SET' : 'MISSING',
-    secretKey: process.env.YOOKASSA_SECRET_KEY ? 'SET' : 'MISSING'
-});
 
 const sendOrderEmail = async (orderData, userData, emailType = 'confirmation') => {
     let transporter;
@@ -1715,6 +1711,8 @@ app.get('/api/products/:id/rating', async (req, res) => {
     }
 })
 
+
+
 app.put('/api/admin/products/:id/status', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const { id } = req.params;
@@ -2146,6 +2144,7 @@ app.get('/api/products', async (req, res) => {
     }
 });
 
+// Этот маршрут должен быть в server.js (проверьте его наличие)
 app.get('/api/products/:id', async (req, res) => {
     try {
         const connection = await pool.getConnection();
@@ -2157,7 +2156,10 @@ app.get('/api/products/:id', async (req, res) => {
         connection.release();
         
         if (products.length === 0) {
-            return res.status(404).json({ error: 'Товар не найден' });
+            return res.status(404).json({ 
+                success: false,
+                error: 'Товар не найден' 
+            });
         }
         
         const product = {
@@ -2170,10 +2172,12 @@ app.get('/api/products/:id', async (req, res) => {
         res.json(product);
     } catch (error) {
         console.error('Ошибка получения продукта:', error);
-        res.status(500).json({ error: 'Ошибка сервера' });
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка сервера' 
+        });
     }
 });
-
 
 app.put('/api/admin/products/:id', authenticateToken, requireAdmin, upload.array('images', 5), async (req, res) => {
     try {
@@ -2225,6 +2229,38 @@ app.put('/api/admin/products/:id', authenticateToken, requireAdmin, upload.array
     } catch (error) {
         console.error('Ошибка обновления товара:', error);
         res.status(500).json({ error: 'Ошибка сервера при обновлении товара' });
+    }
+});
+
+// Добавьте этот маршрут в server.js (можно после GET /api/products/:id)
+// Добавьте после других GET маршрутов для товаров
+app.get('/api/admin/products/:id/check', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const connection = await getConnection();
+        
+        const [products] = await connection.execute(
+            'SELECT id, name FROM products WHERE id = ?',
+            [id]
+        );
+        
+        connection.release();
+        
+        if (products.length === 0) {
+            return res.json({
+                exists: false,
+                message: 'Товар не найден'
+            });
+        }
+        
+        res.json({
+            exists: true,
+            product: products[0]
+        });
+        
+    } catch (error) {
+        console.error('Check product error:', error);
+        res.status(500).json({ error: 'Ошибка проверки товара' });
     }
 });
 
@@ -2661,63 +2697,160 @@ app.get('/api/admin/categories', authenticateToken, requireAdmin, async (req, re
     }
 });
 
-app.post('/api/admin/categories', authenticateToken, requireAdmin, upload.single('image'), async (req, res) => {
+// Добавьте этот код в server.js после других POST-маршрутов для админа
+// ДОБАВЬТЕ ЭТОТ КОД в server.js после других POST маршрутов (примерно после app.post('/api/admin/categories'))
+
+// Добавьте после других POST маршрутов
+app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('images', 10), async (req, res) => {
     let connection;
     try {
-        const { name, description } = req.body;
-        
-        console.log(' Create category request:', { name, description });
-        
-        if (!name || name.trim() === '') {
+        console.log('🆕 CREATE PRODUCT REQUEST received');
+        console.log('📁 Files:', req.files?.length || 0);
+        console.log('📦 Body fields:', Object.keys(req.body));
+
+        const { 
+            name, 
+            price, 
+            description, 
+            category_id, 
+            brand_id, 
+            stock_quantity, 
+            material, 
+            color
+        } = req.body;
+
+        // Валидация
+        if (!name || !price) {
             return res.status(400).json({ 
                 success: false,
-                error: 'Название категории обязательно' 
+                error: 'Название и цена обязательны' 
             });
         }
 
         connection = await getConnection();
-        
-        let imagePath = null;
-        if (req.file) {
-            imagePath = `/uploads/${req.file.filename}`;
+
+        // Проверяем категорию если указана
+        if (category_id) {
+            const [categories] = await connection.execute(
+                'SELECT id FROM categories WHERE id = ?', 
+                [category_id]
+            );
+            if (categories.length === 0) {
+                return res.status(400).json({ 
+                    success: false,
+                    error: 'Категория не найдена' 
+                });
+            }
         }
 
-        const [existing] = await connection.execute(
-            'SELECT id FROM categories WHERE name = ?',
-            [name.trim()]
-        );
-        
-        if (existing.length > 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'Категория с таким названием уже существует'
-            });
+        // Проверяем бренд если указан
+        if (brand_id) {
+            const [brands] = await connection.execute(
+                'SELECT id FROM brands WHERE id = ?', 
+                [brand_id]
+            );
+            if (brands.length === 0) {
+                return res.status(400).json({ 
+                    success: false,
+                    error: 'Бренд не найден' 
+                });
+            }
         }
 
+        // Обрабатываем изображения
+        let images = [];
+        if (req.files && req.files.length > 0) {
+            images = req.files.map(file => `/uploads/${file.filename}`);
+        }
+
+        // Создаем товар
         const [result] = await connection.execute(
-            'INSERT INTO categories (name, description, image) VALUES (?, ?, ?)',
-            [name.trim(), description?.trim() || null, imagePath]
+            `INSERT INTO products 
+            (name, description, price, category_id, brand_id, stock_quantity, material, color, images) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                name.trim(),
+                description?.trim() || '',
+                parseFloat(price),
+                category_id || null,
+                brand_id || null,
+                parseInt(stock_quantity) || 0,
+                material?.trim() || '',
+                color?.trim() || '',
+                JSON.stringify(images)
+            ]
         );
 
-        const [categories] = await connection.execute(
-            'SELECT * FROM categories WHERE id = ?',
-            [result.insertId]
-        );
+        const productId = result.insertId;
+
+        // Получаем созданный товар
+        const [products] = await connection.execute(`
+            SELECT p.*, c.name as category_name, b.name as brand_name 
+            FROM products p 
+            LEFT JOIN categories c ON p.category_id = c.id 
+            LEFT JOIN brands b ON p.brand_id = b.id 
+            WHERE p.id = ?
+        `, [productId]);
+
+        const product = {
+            ...products[0],
+            images: products[0].images ? JSON.parse(products[0].images) : []
+        };
+
+        console.log('✅ Product created successfully:', { id: productId, name: product.name });
 
         res.json({
             success: true,
-            data: categories[0],
-            message: 'Категория успешно создана'
+            data: product,
+            message: 'Товар успешно создан'
         });
 
     } catch (error) {
-        console.error('Create Category Error:', error);
+        console.error('❌ CREATE PRODUCT ERROR:', error);
         res.status(500).json({ 
             success: false,
-            error: 'Ошибка создания категории: ' + error.message 
+            error: 'Ошибка создания товара: ' + error.message
         });
     } finally {
         if (connection) connection.release();
+    }
+});
+
+// Добавьте для отладки
+app.get('/api/admin/diagnostics/products', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const connection = await getConnection();
+        
+        const [products] = await connection.execute(`
+            SELECT id, name, is_active 
+            FROM products 
+            ORDER BY id DESC 
+            LIMIT 20
+        `);
+        
+        const [stats] = await connection.execute(`
+            SELECT 
+                COUNT(*) as total_products,
+                COUNT(CASE WHEN is_active = TRUE THEN 1 END) as active_products,
+                COUNT(CASE WHEN is_active = FALSE THEN 1 END) as inactive_products,
+                MAX(id) as max_id
+            FROM products
+        `);
+        
+        connection.release();
+        
+        res.json({
+            success: true,
+            data: {
+                products: products,
+                stats: stats[0],
+                message: `Всего товаров: ${stats[0].total_products}, Активных: ${stats[0].active_products}, Макс ID: ${stats[0].max_id}`
+            }
+        });
+        
+    } catch (error) {
+        console.error('Products diagnostics error:', error);
+        res.status(500).json({ error: 'Ошибка диагностики' });
     }
 });
 
@@ -3097,7 +3230,7 @@ app.get('/api/admin/brands', authenticateToken, requireAdmin, async (req, res) =
 
 app.post('/api/admin/brands', authenticateToken, requireAdmin, async (req, res) => {
     try {
-        const { name, description } = req.body;
+        const { name } = req.body;
         
         if (!name) {
             return res.status(400).json({ error: 'Название бренда обязательно' });
@@ -3733,25 +3866,23 @@ async function initializeDatabase() {
         `);
         console.log(' Таблица users создана/проверена');
 
-        await connection.query(`
-            CREATE TABLE IF NOT EXISTS categories (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                description TEXT,
-                image VARCHAR(255),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
+await connection.query(`
+    CREATE TABLE IF NOT EXISTS categories (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        image VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+`);
         console.log(' Таблица categories создана/проверена');
 
-        await connection.query(`
-            CREATE TABLE IF NOT EXISTS brands (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                description TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
+await connection.query(`
+    CREATE TABLE IF NOT EXISTS brands (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+`);
         console.log(' Таблица brands создана/проверена');
 
         await connection.query(`

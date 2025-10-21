@@ -70,29 +70,78 @@ const getImageUrl = (imagePath) => {
         }
     }
 
-    const loadExistingData = async () => {
-        const [categoriesData, brandsData, productData] = await Promise.all([
+const loadExistingData = async () => {
+    try {
+        setLoading(true);
+        
+        // Затем загружаем данные
+        const [categoriesData, brandsData, productData] = await Promise.allSettled([
             fetchCategories(),
             fetchBrands(),
             fetchOneProduct(id)
-        ])
-        
-        setCategories(categoriesData)
-        setBrands(brandsData)
-        
-        const category = categoriesData.find(cat => cat.id === productData.category_id)
-        const brand = brandsData.find(br => br.id === productData.brand_id)
-        
-        setName(productData.name)
-        setPrice(productData.price.toString())
-        setDescription(productData.description || '')
-        setCategoryInput(category?.name || '')
-        setBrandInput(brand?.name || '')
-        setMaterialInput(productData.material || '')
-        setColorInput(productData.color || '')
-        setStockQuantity(productData.stock_quantity || 0)
-        setExistingImages(productData.images || []) 
+        ]);
+
+        // Обрабатываем результаты
+        let categories = [];
+        let brands = [];
+
+        if (categoriesData.status === 'fulfilled') {
+            categories = categoriesData.value;
+            setCategories(categories);
+        } else {
+            console.error('Categories load error:', categoriesData.reason);
+        }
+
+        if (brandsData.status === 'fulfilled') {
+            brands = brandsData.value;
+            setBrands(brands);
+        } else {
+            console.error('Brands load error:', brandsData.reason);
+        }
+
+        if (productData.status === 'fulfilled') {
+            const product = productData.value;
+            console.log('✅ Loaded product:', product);
+            
+            // Заполняем форму данными товара
+            setName(product.name || '');
+            setPrice(product.price || '');
+            setDescription(product.description || '');
+            
+            // Находим названия категории и бренда по их ID
+            const categoryName = product.category_id ? 
+                categories.find(c => c.id === product.category_id)?.name || '' 
+                : '';
+            const brandName = product.brand_id ? 
+                brands.find(b => b.id === product.brand_id)?.name || '' 
+                : '';
+                
+            setCategoryInput(categoryName);
+            setBrandInput(brandName);
+            setMaterialInput(product.material || '');
+            setColorInput(product.color || '');
+            setStockQuantity(product.stock_quantity || 0);
+            setExistingImages(product.images || []);
+            setMainImageIndex(0);
+            
+            console.log('📝 Form filled:', { 
+                categoryName, 
+                brandName, 
+                material: product.material,
+                color: product.color 
+            });
+        } else {
+            console.error('❌ Product load error:', productData.reason);
+            setError('Не удалось загрузить данные товара. Проверьте ID товара.');
+        }
+
+    } catch (error) {
+        console.error('❌ Load existing data error:', error);
+        setError('Ошибка загрузки данных: ' + error.message);
+    } finally {
+        setLoading(false);
     }
+};
 
     const handleFileSelect = (e) => {
         const files = Array.from(e.target.files)
@@ -325,20 +374,20 @@ const getImageUrl = (imagePath) => {
         }
     }
 
-    const resetForm = () => {
-        setName('')
-        setPrice('')
-        setDescription('')
-        setCategoryInput('')
-        setBrandInput('')
-        setMaterialInput('')
-        setColorInput('')
-        setStockQuantity(10)
-        setExistingImages([]) 
-        setNewImages([]) 
-        setMainImageIndex(0) 
-        setError('')
-    }
+const resetForm = () => {
+    setName('')
+    setPrice('')
+    setDescription('')
+    setCategoryInput('')
+    setBrandInput('')
+    setMaterialInput('')
+    setColorInput('')
+    setStockQuantity(10)
+    setExistingImages([]) 
+    setNewImages([]) 
+    setMainImageIndex(0) 
+    setError('')
+}
 
     const handleClose = () => {
         newImages.forEach(image => URL.revokeObjectURL(image.preview))

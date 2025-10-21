@@ -598,7 +598,6 @@ const Product = observer(() => {
                 show={showImageModal} 
                 onHide={() => {
                     setShowImageModal(false)
-                    setZoomMode(false)
                 }}
                 size="xl"
                 centered

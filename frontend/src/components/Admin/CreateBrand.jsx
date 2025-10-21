@@ -4,7 +4,6 @@ import { createBrand } from '../../http/catalogAPI'
 
 const CreateBrand = ({ show, setShow, setChange }) => {
     const [name, setName] = useState('')
-    const [description, setDescription] = useState('')
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState('')
 
@@ -15,14 +14,12 @@ const CreateBrand = ({ show, setShow, setChange }) => {
 
         try {
             const brandData = {
-                name: name.trim(),
-                description: description.trim()
+                name: name.trim()
             }
 
             await createBrand(brandData)
             
             setName('')
-            setDescription('')
             setShow(false)
             setChange(prev => !prev)
             
@@ -39,7 +36,6 @@ const CreateBrand = ({ show, setShow, setChange }) => {
         setShow(false)
         setError('')
         setName('')
-        setDescription('')
     }
 
     return (
@@ -65,32 +61,6 @@ const CreateBrand = ({ show, setShow, setChange }) => {
                             Укажите название бренда
                         </Form.Text>
                     </Form.Group>
-                    
-                    <Form.Group className="mb-3">
-                        <Form.Label>Описание бренда</Form.Label>
-                        <Form.Control
-                            as="textarea"
-                            rows={3}
-                            value={description}
-                            onChange={e => setDescription(e.target.value)}
-                            placeholder="Опишите бренд, его особенности и преимущества..."
-                        />
-                        <Form.Text className="text-muted">
-                            Это описание будет видно покупателям
-                        </Form.Text>
-                    </Form.Group>
-
-                    {(name || description) && (
-                        <Card className="mt-3">
-                            <Card.Header>
-                                <strong>Предпросмотр бренда:</strong>
-                            </Card.Header>
-                            <Card.Body>
-                                <h5>{name || 'Название бренда'}</h5>
-                                <p className="text-muted">{description || 'Описание бренда...'}</p>
-                            </Card.Body>
-                        </Card>
-                    )}
                 </Modal.Body>
                 
                 <Modal.Footer>
