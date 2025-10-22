@@ -391,7 +391,10 @@ export const fetchAllProducts = () => apiClient.getProducts();
 export const fetchProducts = (params = {}) => apiClient.getProducts(params);
 export const fetchOneProduct = (id) => apiClient.getProduct(id);
 export const fetchBasket = () => apiClient.getBasket();
-export const addToBasket = (productId, quantity) => apiClient.addToBasket(productId, quantity);
+export const addToBasket = async (productId, quantity) => {
+    const response = await apiClient.addToBasket(productId, quantity);
+    return response;
+};
 
 export const fetchAdminStats = async () => {
     try {

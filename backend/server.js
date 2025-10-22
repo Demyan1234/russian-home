@@ -1319,6 +1319,7 @@ app.post('/api/basket', authenticateToken, async (req, res) => {
         const { product_id, quantity = 1 } = req.body;
         const connection = await pool.getConnection();
 
+        // Получаем информацию о товаре
         const [products] = await connection.execute(
             'SELECT * FROM products WHERE id = ? AND is_active = TRUE',
             [product_id]
@@ -1329,20 +1330,43 @@ app.post('/api/basket', authenticateToken, async (req, res) => {
             return res.status(404).json({ error: 'Товар не найден' });
         }
         
+        const product = products[0];
+        
+        // ВАЛИДАЦИЯ: проверяем доступное количество
+        if (quantity > product.stock_quantity) {
+            connection.release();
+            return res.status(400).json({ 
+                error: `Недостаточно товара на складе. Доступно: ${product.stock_quantity} шт.` 
+            });
+        }
+        
+        // Проверяем, не превышает ли запрашиваемое количество максимальный лимит
+        const maxQuantity = Math.min(product.stock_quantity, 100); // максимум 100 шт за раз
+        const actualQuantity = Math.min(quantity, maxQuantity);
+        
         const [existing] = await connection.execute(
             'SELECT * FROM cart WHERE user_id = ? AND product_id = ?',
             [req.user.id, product_id]
         );
         
         if (existing.length > 0) {
+            // Проверяем, не превысит ли общее количество доступное на складе
+            const newTotalQuantity = existing[0].quantity + actualQuantity;
+            if (newTotalQuantity > product.stock_quantity) {
+                connection.release();
+                return res.status(400).json({ 
+                    error: `Недостаточно товара на складе. В корзине уже ${existing[0].quantity} шт., доступно еще: ${product.stock_quantity - existing[0].quantity} шт.` 
+                });
+            }
+            
             await connection.execute(
                 'UPDATE cart SET quantity = quantity + ? WHERE user_id = ? AND product_id = ?',
-                [quantity, req.user.id, product_id]
+                [actualQuantity, req.user.id, product_id]
             );
         } else {
             await connection.execute(
                 'INSERT INTO cart (user_id, product_id, quantity) VALUES (?, ?, ?)',
-                [req.user.id, product_id, quantity]
+                [req.user.id, product_id, actualQuantity]
             );
         }
         
@@ -1350,7 +1374,9 @@ app.post('/api/basket', authenticateToken, async (req, res) => {
         
         res.json({ 
             success: true,
-            message: 'Товар добавлен в корзину' 
+            message: 'Товар добавлен в корзину',
+            addedQuantity: actualQuantity,
+            availableQuantity: product.stock_quantity
         });
     } catch (error) {
         console.error('Ошибка добавления в корзину:', error);
@@ -1363,14 +1389,41 @@ app.put('/api/basket/:productId', authenticateToken, async (req, res) => {
         const { quantity } = req.body;
         const connection = await pool.getConnection();
         
+        const [products] = await connection.execute(
+            'SELECT stock_quantity FROM products WHERE id = ? AND is_active = TRUE',
+            [req.params.productId]
+        );
+        
+        if (products.length === 0) {
+            connection.release();
+            return res.status(404).json({ error: 'Товар не найден' });
+        }
+        
+        const product = products[0];
+        
+        if (quantity > product.stock_quantity) {
+            connection.release();
+            return res.status(400).json({ 
+                error: `Недостаточно товара на складе. Доступно: ${product.stock_quantity} шт.` 
+            });
+        }
+        
+        const maxQuantity = Math.min(product.stock_quantity, 100);
+        const actualQuantity = Math.min(quantity, maxQuantity);
+        
         await connection.execute(
             'UPDATE cart SET quantity = ? WHERE user_id = ? AND product_id = ?',
-            [quantity, req.user.id, req.params.productId]
+            [actualQuantity, req.user.id, req.params.productId]
         );
         
         connection.release();
         
-        res.json({ message: 'Количество обновлено' });
+        res.json({ 
+            success: true,
+            message: 'Количество обновлено',
+            quantity: actualQuantity,
+            availableQuantity: product.stock_quantity
+        });
     } catch (error) {
         console.error('Ошибка обновления корзины:', error);
         res.status(500).json({ error: 'Ошибка сервера' });
