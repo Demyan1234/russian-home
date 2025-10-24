@@ -1,5 +1,5 @@
 import { useContext, useEffect, useState, useRef } from 'react'
-import { Navbar, Nav, Container, Button, Badge } from 'react-bootstrap'
+import { Navbar, Nav, Container, Button, Badge, Dropdown } from 'react-bootstrap'
 import { observer } from 'mobx-react-lite'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { SHOP_ROUTE, LOGIN_ROUTE, ADMIN_ROUTE, BASKET_ROUTE } from '../utils/consts'
@@ -28,9 +28,19 @@ const NavBar = observer(() => {
 
     const basketCount = basket?.count || 0
     const isAuth = user?.isAuth === true
-    const isAdmin = user?.isAdmin === true
+    const userRole = user?.user?.role
+    const isAdmin = userRole === 'admin'
+    const isManager = userRole === 'manager'
     const userName = user?.user?.name || user?.user?.email || 'Пользователь'
     const favoritesCount = favorites?.favoritesCount || 0
+
+    console.log('NavBar User State:', {
+        isAuth,
+        userRole,
+        isAdmin,
+        isManager,
+        userName
+    })
 
     const logOut = () => {
         if (user && typeof user.logout === 'function') {
@@ -40,9 +50,16 @@ const NavBar = observer(() => {
     }
 
     const handleCategorySelect = (categoryId) => {
-        console.log(' Выбрана категория:', categoryId);
-        navigate(`/shop?category=${categoryId}`);
-        setShowDropdown(false);
+        navigate(`/shop?category=${categoryId}`)
+        setShowDropdown(false)
+    }
+
+    const navigateToAdmin = () => {
+        navigate('/admin')
+    }
+
+    const navigateToManager = () => {
+        navigate('/manager')
     }
 
     useEffect(() => {
@@ -59,26 +76,29 @@ const NavBar = observer(() => {
     }, [])
 
     return (
-        <Navbar bg="dark" variant="dark" expand="lg">
+        <Navbar bg="dark" variant="dark" expand="lg" className="py-1">
             <Container>
+                {/* Логотип */}
                 <Navbar.Brand 
-                    style={{cursor: 'pointer'}} 
-                    onClick={() => navigate('/')}
                     className="fw-bold"
+                    style={{cursor: 'pointer', fontSize: '1.2rem'}} 
+                    onClick={() => navigate('/')}
                 >
                     Russian Home
                 </Navbar.Brand>
                 
                 <Navbar.Toggle aria-controls="basic-navbar-nav" />
                 <Navbar.Collapse id="basic-navbar-nav">
+                    {/* Основная навигация */}
                     <Nav className="me-auto">
                         <Nav.Link 
                             onClick={() => navigate('/')}
-                            active={location.pathname === '/'}
+                            className={location.pathname === '/' ? 'active' : ''}
                         >
                             Главная
                         </Nav.Link>
                         
+                        {/* Выпадающий каталог */}
                         <div 
                             ref={dropdownRef}
                             className="nav-item dropdown"
@@ -103,8 +123,7 @@ const NavBar = observer(() => {
                                         zIndex: 1000,
                                         minWidth: '200px',
                                         backgroundColor: '#343a40',
-                                        border: '1px solid #495057',
-                                        borderRadius: '0.375rem'
+                                        border: '1px solid #495057'
                                     }}
                                 >
                                     <button 
@@ -136,72 +155,110 @@ const NavBar = observer(() => {
                             )}
                         </div>
                         
+                        {/* Мои заказы */}
                         {isAuth && (
                             <Nav.Link 
-                                onClick={() => navigate('/user/orders')}
-                                active={location.pathname === '/user/orders'}
+                                onClick={() => navigate('/orders')}
+                                className={location.pathname === '/orders' ? 'active' : ''}
                             >
                                 Мои заказы
                             </Nav.Link>
                         )}
-                        
+                    </Nav>
+                    
+                    <Nav className="ms-auto d-flex align-items-center">
+                        {/* Избранное */}
                         {isAuth && (
                             <Nav.Link 
-                                as={Link} 
-                                to="/favorites" 
-                                className="d-flex align-items-center position-relative"
-                                active={location.pathname === '/favorites'}
+                                onClick={() => navigate('/favorites')}
+                                className={`me-2 ${location.pathname === '/favorites' ? 'active' : ''}`}
                             >
                                 Избранное
                                 {favoritesCount > 0 && (
-                                    <Badge 
-                                        bg="danger" 
-                                        className="position-absolute top-0 start-100 translate-middle"
-                                        style={{ fontSize: '0.7rem' }}
-                                    >
+                                    <Badge bg="danger" className="ms-1" style={{ fontSize: '0.7rem' }}>
+                                        {favoritesCount}
                                     </Badge>
                                 )}
                             </Nav.Link>
                         )}
-                    </Nav>
-                    
-                    <Nav className="ms-auto">
-                        {isAuth ? (
-                            <>
-                                <Button 
-                                    variant="outline-light" 
-                                    className="me-2 position-relative"
-                                    onClick={() => navigate(BASKET_ROUTE)}
-                                >
-                                    Корзина 
-                                    {basketCount > 0 && (
-                                        <Badge 
-                                            bg="danger" 
-                                            className="position-absolute top-0 start-100 translate-middle"
-                                            style={{ fontSize: '0.7rem' }}
-                                        >
-                                            {basketCount}
-                                        </Badge>
-                                    )}
-                                </Button>
-                                
-                                {isAdmin && (
-                                    <Button 
-                                        variant="outline-warning" 
-                                        className="me-2"
-                                        onClick={() => navigate(ADMIN_ROUTE)}
+
+                        {/* Корзина */}
+                        {isAuth && (
+                            <Button 
+                                variant="outline-light" 
+                                size="sm"
+                                className="me-2 position-relative"
+                                onClick={() => navigate(BASKET_ROUTE)}
+                            >
+                                Корзина
+                                {basketCount > 0 && (
+                                    <Badge 
+                                        bg="danger" 
+                                        className="position-absolute top-0 start-100 translate-middle"
+                                        style={{ fontSize: '0.6rem' }}
                                     >
-                                        Панель управления
-                                    </Button>
+                                        {basketCount}
+                                    </Badge>
                                 )}
-                                
-                                <Button variant="outline-light" onClick={logOut}>
-                                    Выйти ({userName})
-                                </Button>
-                            </>
+                            </Button>
+                        )}
+
+                        {/* Панель менеджера  */}
+                        {isManager && !isAdmin && (
+                            <Button 
+                                variant="outline-info" 
+                                size="sm"
+                                className="me-2"
+                                onClick={navigateToManager}
+                            >
+                                Панель менеджера
+                            </Button>
+                        )}
+
+                        {/* Панель админа  */}
+                        {isAdmin && (
+                            <Button 
+                                variant="outline-warning" 
+                                size="sm"
+                                className="me-2"
+                                onClick={navigateToAdmin}
+                            >
+                                Панель админа
+                            </Button>
+                        )}
+
+                        {/* Кнопка входа/выхода */}
+                        {isAuth ? (
+                            <Dropdown align="end">
+                                <Dropdown.Toggle 
+                                    variant="outline-light" 
+                                    size="sm"
+                                    id="user-dropdown"
+                                >
+                                    {userName}
+                                </Dropdown.Toggle>
+
+                                <Dropdown.Menu className="dropdown-menu-dark">
+                                    <Dropdown.ItemText className="text-muted small">
+                                        Роль: {isAdmin ? 'Администратор' : isManager ? 'Менеджер' : 'Пользователь'}
+                                    </Dropdown.ItemText>
+                                    <Dropdown.Divider />
+                                    <Dropdown.Item onClick={() => navigate('/orders')}>
+                                        Мои заказы
+                                    </Dropdown.Item>
+                                    <Dropdown.Item onClick={() => navigate('/favorites')}>
+                                        Избранное
+                                    </Dropdown.Item>
+                                    <Dropdown.Divider />
+                                    <Dropdown.Item onClick={logOut} className="text-danger">
+                                        Выйти
+                                    </Dropdown.Item>
+                                </Dropdown.Menu>
+                            </Dropdown>
                         ) : (
                             <Button 
                                 variant="outline-light"
+                                size="sm"
                                 onClick={() => navigate(LOGIN_ROUTE)}
                             >
                                 Войти

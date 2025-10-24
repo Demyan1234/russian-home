@@ -1,4 +1,4 @@
-const BASE_URL = '/api';
+const BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 class ApiClient {
     constructor() {
@@ -219,7 +219,7 @@ export const createProduct = async (formData) => {
             body: formData
         });
 
-        console.log('📨 Create product response status:', response.status);
+        console.log(' Create product response status:', response.status);
 
         if (!response.ok) {
             let errorMessage = `HTTP error! status: ${response.status}`;
@@ -381,8 +381,6 @@ export const deleteBrand = async (id) => {
 };
 
 export const apiClient = new ApiClient();
-export const loginUser = (email, password) => apiClient.login(email, password);
-export const registerUser = (userData) => apiClient.register(userData);
 export const fetchProfile = () => apiClient.getProfile();
 export const fetchHomepageData = () => apiClient.getHomepageData();
 export const fetchCategories = () => apiClient.getCategories();
@@ -930,3 +928,127 @@ export const fetchAdminProducts = async () => {
         throw error;
     }
 };
+
+// ДОБАВИТЬ в конец файла:
+
+// ==================== МЕТОДЫ МОДЕРАЦИИ ОТЗЫВОВ ====================
+
+export const fetchReviewsForModeration = async (status = 'pending') => {
+    try {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            throw new Error('Требуется авторизация');
+        }
+
+        const response = await fetch(`${BASE_URL}/admin/reviews/moderation?status=${status}`, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error('Ошибка получения отзывов для модерации');
+        }
+
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error('Fetch reviews for moderation error:', error);
+        throw error;
+    }
+};
+
+export const fetchModerationStats = async () => {
+    try {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            throw new Error('Требуется авторизация');
+        }
+
+        const response = await fetch(`${BASE_URL}/admin/reviews/moderation/stats`, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error('Ошибка получения статистики модерации');
+        }
+
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error('Fetch moderation stats error:', error);
+        throw error;
+    }
+};
+
+export const approveReview = async (reviewId, moderationComment = '') => {
+    try {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            throw new Error('Требуется авторизация');
+        }
+
+        const response = await fetch(`${BASE_URL}/admin/reviews/${reviewId}/approve`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ moderation_comment: moderationComment })
+        });
+
+        if (!response.ok) {
+            throw new Error('Ошибка одобрения отзыва');
+        }
+
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error('Approve review error:', error);
+        throw error;
+    }
+};
+
+export const rejectReview = async (reviewId, moderationComment) => {
+    try {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            throw new Error('Требуется авторизация');
+        }
+
+        if (!moderationComment) {
+            throw new Error('Укажите причину отклонения');
+        }
+
+        const response = await fetch(`${BASE_URL}/admin/reviews/${reviewId}/reject`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ moderation_comment: moderationComment })
+        });
+
+        if (!response.ok) {
+            throw new Error('Ошибка отклонения отзыва');
+        }
+
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error('Reject review error:', error);
+        throw error;
+    }
+};
+export const registerUser = async (userData) => {
+    return apiClient.register(userData);
+};
+
+export const loginUser = async (email, password) => {
+    return apiClient.login(email, password);
+};
+

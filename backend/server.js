@@ -10,9 +10,813 @@ const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 const compression = require('compression');
 const helmet = require('helmet');
-
+const nodemailer = require('nodemailer');
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+const ROLES = {
+    ADMIN: 'admin',
+    MANAGER: 'manager',
+    USER: 'user'
+};
+
+const PERMISSIONS = {
+    ADMIN: [
+        'users.manage', 'roles.manage', 'products.manage',
+        'categories.manage', 'brands.manage', 'orders.manage',
+        'reviews.moderate', 'filters.manage', 'stats.view',
+        'settings.manage', 'email_templates.manage'
+    ],
+    
+    MANAGER: [
+        'products.create', 'products.update', 'products.delete',
+        'reviews.moderate', 'filters.manage', 'orders.view',
+        'stats.view', 'categories.view', 'brands.view'
+    ],
+    
+    USER: [
+        'products.view', 'orders.create', 'reviews.create',
+        'profile.view', 'basket.manage', 'favorites.manage'
+    ]
+};
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error(' Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error(' Uncaught Exception:', error);
+});
+
+app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false
+}));
+
+app.use(compression());
+
+const limiter = rateLimit({
+    windowMs: 1 * 60 * 1000, 
+    max: 100, 
+    message: {
+        error: 'Слишком много запросов, попробуйте позже'
+    },
+    skipSuccessfulRequests: true 
+});
+
+app.use('/api/', limiter);
+
+const cache = new Map();
+
+const CACHE_DURATION = {
+    SHORT: 1 * 60 * 1000, 
+    MEDIUM: 5 * 60 * 1000, 
+    LONG: 30 * 60 * 1000 
+};
+
+const withCache = (key, fetchFunction, duration = CACHE_DURATION.MEDIUM) => {
+    const cached = cache.get(key);
+    if (cached && Date.now() - cached.timestamp < duration) {
+        return Promise.resolve(cached.data);
+    }
+    
+    return fetchFunction().then(data => {
+        cache.set(key, {
+            data,
+            timestamp: Date.now()
+        });
+        return data;
+    });
+};
+
+app.use(cors({
+    origin: function (origin, callback) {
+        const allowedOrigins = [
+            'http://localhost:5173', 
+            'http://localhost:5174',
+            'http://localhost:3000',
+            'http://127.0.0.1:5173',
+            'http://127.0.0.1:5174',
+            'http://127.0.0.1:3000'
+        ];
+        
+        if (!origin) return callback(null, true);
+        
+        if (allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            console.log(' CORS Blocked Origin:', origin);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: [
+        'Content-Type', 
+        'Authorization', 
+        'X-Requested-With',
+        'Accept',
+        'Origin',
+        'Access-Control-Request-Method',
+        'Access-Control-Request-Headers'
+    ],
+    exposedHeaders: ['Authorization'],
+    maxAge: 86400
+}));
+
+app.options('*', (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Max-Age', '86400');
+    res.status(204).send();
+});
+
+app.options('*', cors());
+
+app.use(express.json());
+
+app.use('/uploads', express.static('uploads', {
+    setHeaders: (res, path) => {
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'GET');
+        res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+        res.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
+    },
+    maxAge: '1d'
+}));
+
+app.use((req, res, next) => {
+    console.log(`\n[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+    console.log('User:', req.user ? { id: req.user.id, role: req.user.role } : 'No user');
+    console.log('Headers:', {
+        authorization: req.headers.authorization ? 'PRESENT' : 'MISSING',
+        origin: req.headers.origin
+    });
+    next();
+});
+
+app.use('/static', express.static('static', {
+    setHeaders: (res, path) => {
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'GET');
+        res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+    },
+    maxAge: '1d'
+}));
+
+if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
+if (!fs.existsSync('static')) fs.mkdirSync('static');
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, 'uploads/');
+    },
+    filename: (req, file, cb) => {
+        const timestamp = Date.now();
+        const originalName = file.originalname;
+        const safeName = originalName.replace(/[^a-zA-Z0-9.\-]/g, '_');
+        cb(null, `${timestamp}-${safeName}`);
+    }
+});
+
+const upload = multer({ 
+    storage,
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        } else {
+            cb(new Error('Only image files are allowed'), false);
+        }
+    },
+    limits: {
+        fileSize: 5 * 1024 * 1024 
+    }
+});
+
+const getUserPermissions = (role) => {
+    return PERMISSIONS[role.toUpperCase()] || PERMISSIONS.USER;
+};
+
+const checkPermission = (requiredPermissions) => {
+    return (req, res, next) => {
+        if (!req.user) {
+            return res.status(401).json({ 
+                success: false,
+                error: 'Требуется авторизация' 
+            });
+        }
+
+        const userPermissions = getUserPermissions(req.user.role);
+        
+        const hasPermission = requiredPermissions.some(permission => 
+            userPermissions.includes(permission)
+        );
+
+        if (!hasPermission) {
+            return res.status(403).json({ 
+                success: false,
+                error: 'Недостаточно прав для выполнения этого действия' 
+            });
+        }
+
+        next();
+    };
+};
+
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+        req.user = null;
+        return next();
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret-key', (err, user) => {
+        if (err) {
+            return res.status(403).json({ 
+                success: false,
+                error: 'Неверный токен',
+                details: err.message 
+            });
+        }
+        
+        if (user.role === 'user' && !user.email_verified) {
+            req.user = { ...user, email_verified: false };
+        } else {
+            req.user = user;
+        }
+        
+        next();
+    });
+};
+
+const requireAdmin = (req, res, next) => {
+    if (!req.user) {
+        return res.status(401).json({ error: 'Требуется авторизация' });
+    }
+    
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ 
+            success: false,
+            error: 'Недостаточно прав. Требуется роль администратора' 
+        });
+    }
+    
+    next();
+};
+
+const requireManager = (req, res, next) => {
+    if (!req.user) {
+        return res.status(401).json({ error: 'Требуется авторизация' });
+    }
+    
+    if (req.user.role !== ROLES.MANAGER && req.user.role !== ROLES.ADMIN) {
+        return res.status(403).json({ 
+            success: false,
+            error: 'Недостаточно прав. Требуется роль менеджера или администратора' 
+        });
+    }
+    
+    next();
+};
+
+const requireManagerOrAdmin = (req, res, next) => {
+    if (!req.user) {
+        return res.status(401).json({ error: 'Требуется авторизация' });
+    }
+    
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') {
+        return res.status(403).json({ 
+            success: false,
+            error: 'Недостаточно прав. Требуется роль менеджера или администратора' 
+        });
+    }
+    
+    next();
+};
+
+
+
+const generateVerificationCode = () => {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+const sendVerificationCodeEmail = async (user, verificationCode) => {
+    try {
+        if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+            console.log('SMTP не настроен, пропускаем отправку письма с кодом');
+            return;
+        }
+
+        const transporter = nodemailer.createTransport({
+            host: process.env.SMTP_HOST || 'smtp.gmail.com',
+            port: process.env.SMTP_PORT || 587,
+            secure: false,
+            auth: {
+                user: process.env.SMTP_USER,
+                pass: process.env.SMTP_PASS
+            }
+        });
+        
+        const emailHtml = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    body { font-family: Arial, sans-serif; color: #333; line-height: 1.6; }
+                    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+                    .content { padding: 30px; background: #f8f9fa; }
+                    .code { font-size: 2.5em; font-weight: bold; text-align: center; color: #28a745; background: white; padding: 20px; margin: 20px 0; border-radius: 10px; border: 2px dashed #28a745; }
+                    .footer { background: #e9ecef; padding: 20px; text-align: center; border-radius: 0 0 10px 10px; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Код подтверждения Russian Home</h1>
+                    </div>
+                    
+                    <div class="content">
+                        <p>Уважаемый(ая) <strong>${user.name}</strong>,</p>
+                        <p>Для завершения регистрации введите следующий код подтверждения:</p>
+                        
+                        <div class="code">${verificationCode}</div>
+                        
+                        <p><strong>Срок действия кода:</strong> 10 минут</p>
+                        <p>Если вы не регистрировались в нашем магазине, просто проигнорируйте это письмо.</p>
+                    </div>
+                    
+                    <div class="footer">
+                        <p>С уважением,<br><strong>Команда Russian Home</strong></p>
+                        <p>© 2024 Russian Home. Все права защищены.</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+        `;
+
+        const mailOptions = {
+            from: process.env.SMTP_FROM || 'noreply@russianhome.ru',
+            to: user.email,
+            subject: 'Код подтверждения - Russian Home',
+            html: emailHtml
+        };
+        
+        await transporter.sendMail(mailOptions);
+        console.log(`Verification code sent to ${user.email}`);
+        
+    } catch (error) {
+        console.error('Error sending verification code email:', error);
+        throw error;
+    }
+};
+
+app.post('/api/auth/verify-code', async (req, res) => {
+    let connection;
+    try {
+        const { email, code } = req.body;
+        
+        console.log('Verify code request:', { email, code });
+        
+        if (!email || !code) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Email и код обязательны' 
+            });
+        }
+
+        connection = await pool.getConnection();
+        
+        const [users] = await connection.execute(
+            'SELECT id, email, name, verification_code, verification_code_expires, email_verified FROM users WHERE email = ?',
+            [email]
+        );
+        
+        if (users.length === 0) {
+            connection.release();
+            return res.status(400).json({ 
+                success: false,
+                error: 'Пользователь не найден' 
+            });
+        }
+        
+        const user = users[0];
+        console.log('User found:', { 
+            id: user.id, 
+            hasCode: !!user.verification_code,
+            codeExpires: user.verification_code_expires,
+            currentTime: new Date(),
+            isExpired: new Date() > user.verification_code_expires
+        });
+        
+        // Проверяем срок действия кода
+        if (!user.verification_code_expires || new Date() > user.verification_code_expires) {
+            connection.release();
+            return res.status(400).json({ 
+                success: false,
+                error: 'Срок действия кода истек. Запросите новый код.' 
+            });
+        }
+        
+        // Проверяем код
+        if (user.verification_code !== code) {
+            connection.release();
+            return res.status(400).json({ 
+                success: false,
+                error: 'Неверный код подтверждения' 
+            });
+        }
+        
+        // Подтверждаем email и очищаем код
+        const userId = parseInt(user.id);
+        console.log('Updating user verification status for ID:', userId);
+        
+        await connection.execute(
+            'UPDATE users SET email_verified = TRUE, verification_code = NULL, verification_code_expires = NULL WHERE id = ?',
+            [userId]
+        );
+        
+        // ИСПРАВЛЕНИЕ: Правильно создаем JWT токен
+        const token = jwt.sign(
+            { 
+                id: userId, 
+                email: user.email, 
+                role: 'user',
+                email_verified: true
+            },
+            process.env.JWT_SECRET || 'fallback-secret-key',
+            { expiresIn: '24h' }
+        );
+
+        console.log('JWT token created successfully');
+
+        // Получаем обновленные данные пользователя
+        const [updatedUsers] = await connection.execute(
+            'SELECT id, email, name, phone, role, email_verified, created_at FROM users WHERE id = ?',
+            [userId]
+        );
+        
+        connection.release();
+        
+        console.log('Email verification successful for:', email);
+        console.log('Sending response with token and user data');
+        
+        res.json({ 
+            success: true,
+            message: 'Email успешно подтвержден',
+            data: {
+                token: token, // Убедимся что token определен
+                user: updatedUsers[0]
+            }
+        });
+        
+    } catch (error) {
+        console.error('Email verification error:', error);
+        console.error('Error stack:', error.stack);
+        if (connection) connection.release();
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка подтверждения email',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+});
+
+app.get('/api/debug/user/:email', async (req, res) => {
+    try {
+        const { email } = req.params;
+        const connection = await pool.getConnection();
+        
+        const [users] = await connection.execute(
+            'SELECT id, email, email_verified, verification_code, verification_code_expires FROM users WHERE email = ?',
+            [email]
+        );
+        
+        connection.release();
+        
+        if (users.length === 0) {
+            return res.json({ error: 'User not found' });
+        }
+        
+        res.json({
+            user: users[0],
+            currentTime: new Date(),
+            codeExpired: new Date() > users[0].verification_code_expires
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+app.post('/api/auth/resend-code', async (req, res) => {
+    try {
+        const { email } = req.body;
+        
+        if (!email) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Email обязателен' 
+            });
+        }
+
+        const connection = await pool.getConnection();
+        
+        const [users] = await connection.execute(
+            'SELECT id, email, name, email_verified FROM users WHERE email = ?',
+            [email]
+        );
+        
+        if (users.length === 0) {
+            connection.release();
+            return res.status(400).json({ 
+                success: false,
+                error: 'Пользователь не найден' 
+            });
+        }
+        
+        const user = users[0];
+        
+        if (user.email_verified) {
+            connection.release();
+            return res.status(400).json({ 
+                success: false,
+                error: 'Email уже подтвержден' 
+            });
+        }
+        
+        const verificationCode = generateVerificationCode();
+        const verificationCodeExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 минут
+        
+        await connection.execute(
+            'UPDATE users SET verification_code = ?, verification_code_expires = ? WHERE id = ?',
+            [verificationCode, verificationCodeExpires, user.id]
+        );
+        
+        connection.release();
+
+        try {
+            await sendVerificationCodeEmail(user, verificationCode);
+            res.json({ 
+                success: true,
+                message: 'Новый код подтверждения отправлен на ваш email'
+            });
+        } catch (emailError) {
+            console.error('Failed to send verification code:', emailError);
+            res.status(500).json({ 
+                success: false,
+                error: 'Ошибка отправки кода' 
+            });
+        }
+        
+    } catch (error) {
+        console.error('Resend code error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка сервера' 
+        });
+    }
+});
+
+app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+    let connection;
+    try {
+        console.log('Admin fetching users');
+        
+        connection = await getConnection();
+        
+        const [users] = await connection.execute(`
+            SELECT 
+                id, email, name, phone, role, email_verified,
+                DATE_FORMAT(created_at, '%d.%m.%Y %H:%i') as created_at
+            FROM users 
+            ORDER BY created_at DESC
+        `);
+        
+        connection.release();
+        
+        res.json({
+            success: true,
+            data: users
+        });
+        
+    } catch (error) {
+        console.error('Get users error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка получения пользователей' 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.put('/api/admin/users/:id/role', authenticateToken, requireAdmin, async (req, res) => {
+    let connection;
+    try {
+        const { id } = req.params;
+        const { role } = req.body;
+        
+        if (!['user', 'manager', 'admin'].includes(role)) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Неверная роль. Допустимые: user, manager, admin' 
+            });
+        }
+        
+        if (parseInt(id) === req.user.id) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Нельзя изменить свою роль' 
+            });
+        }
+        
+        connection = await getConnection();
+        
+        const [users] = await connection.execute(
+            'SELECT id FROM users WHERE id = ?',
+            [id]
+        );
+        
+        if (users.length === 0) {
+            return res.status(404).json({ 
+                success: false,
+                error: 'Пользователь не найден' 
+            });
+        }
+        
+        await connection.execute(
+            'UPDATE users SET role = ? WHERE id = ?',
+            [role, id]
+        );
+        
+        res.json({
+            success: true,
+            message: `Роль пользователя изменена на "${role}"`
+        });
+        
+    } catch (error) {
+        console.error('Update user role error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка изменения роли' 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, async (req, res) => {
+    let connection;
+    try {
+        const { id } = req.params;
+        
+        if (parseInt(id) === req.user.id) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Нельзя удалить свой аккаунт' 
+            });
+        }
+        
+        connection = await getConnection();
+        
+        const [users] = await connection.execute(
+            'SELECT id FROM users WHERE id = ?',
+            [id]
+        );
+        
+        if (users.length === 0) {
+            return res.status(404).json({ 
+                success: false,
+                error: 'Пользователь не найден' 
+            });
+        }
+        
+        await connection.execute('DELETE FROM users WHERE id = ?', [id]);
+        
+        res.json({
+            success: true,
+            message: 'Пользователь удален'
+        });
+        
+    } catch (error) {
+        console.error('Delete user error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка удаления пользователя' 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/user/permissions', authenticateToken, async (req, res) => {
+    try {
+        const permissions = getUserPermissions(req.user.role);
+        
+        res.json({
+            success: true,
+            data: {
+                permissions: permissions,
+                role: req.user.role,
+                userId: req.user.id
+            }
+        });
+        
+    } catch (error) {
+        console.error('Get permissions error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка получения прав' 
+        });
+    }
+});
+
+const sendVerificationEmail = async (user, verificationToken) => {
+    try {
+        if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+            console.log('SMTP не настроен, пропускаем отправку письма подтверждения');
+            return;
+        }
+
+        const transporter = nodemailer.createTransport({
+            host: process.env.SMTP_HOST || 'smtp.gmail.com',
+            port: process.env.SMTP_PORT || 587,
+            secure: false,
+            auth: {
+                user: process.env.SMTP_USER,
+                pass: process.env.SMTP_PASS
+            }
+        });
+        
+        const verificationUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/verify-email?token=${verificationToken}`;
+        
+        const emailHtml = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    body { font-family: Arial, sans-serif; color: #333; line-height: 1.6; }
+                    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+                    .content { padding: 30px; background: #f8f9fa; }
+                    .button { display: inline-block; padding: 12px 30px; background: #28a745; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }
+                    .footer { background: #e9ecef; padding: 20px; text-align: center; border-radius: 0 0 10px 10px; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Добро пожаловать в Russian Home!</h1>
+                    </div>
+                    
+                    <div class="content">
+                        <p>Уважаемый(ая) <strong>${user.name}</strong>,</p>
+                        <p>Благодарим вас за регистрацию в нашем магазине.</p>
+                        <p>Для завершения регистрации и активации вашего аккаунта, пожалуйста, подтвердите ваш email адрес:</p>
+                        
+                        <div style="text-align: center;">
+                            <a href="${verificationUrl}" class="button">Подтвердить Email</a>
+                        </div>
+                        
+                        <p>Если кнопка не работает, скопируйте и вставьте в браузер следующую ссылку:</p>
+                        <p><small>${verificationUrl}</small></p>
+                        
+                        <p><strong>Срок действия ссылки:</strong> 24 часа</p>
+                        
+                        <p>Если вы не регистрировались в нашем магазине, просто проигнорируйте это письмо.</p>
+                    </div>
+                    
+                    <div class="footer">
+                        <p>С уважением,<br><strong>Команда Russian Home</strong></p>
+                        <p>© 2024 Russian Home. Все права защищены.</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+        `;
+
+        const mailOptions = {
+            from: process.env.SMTP_FROM || 'noreply@russianhome.ru',
+            to: user.email,
+            subject: 'Подтверждение email - Russian Home',
+            html: emailHtml
+        };
+        
+        await transporter.sendMail(mailOptions);
+        console.log(`Verification email sent to ${user.email}`);
+        
+    } catch (error) {
+        console.error('Error sending verification email:', error);
+        throw error;
+    }
+};
 
 const checkSMTPConfig = () => {
     const required = ['SMTP_USER', 'SMTP_PASS'];
@@ -30,7 +834,6 @@ const checkSMTPConfig = () => {
 
 checkSMTPConfig();
 
-
 const originalEmit = process.emit;
 process.emit = function (name, data, ...args) {
     if (name === 'warning' && data?.name === 'DeprecationWarning' && data?.message?.includes('util._extend')) {
@@ -38,7 +841,6 @@ process.emit = function (name, data, ...args) {
     }
     return originalEmit.apply(process, arguments);
 };
-
 
 const sendOrderEmail = async (orderData, userData, emailType = 'confirmation') => {
     let transporter;
@@ -88,18 +890,6 @@ const sendOrderEmail = async (orderData, userData, emailType = 'confirmation') =
             transporter.close();
         }
     }
-};
-
-const requireAdmin = (req, res, next) => {
-    if (!req.user) {
-        return res.status(401).json({ error: 'Требуется авторизация' });
-    }
-    
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'Недостаточно прав' });
-    }
-    
-    next();
 };
 
 const generateOrderConfirmationEmail = (order, user) => {
@@ -173,8 +963,6 @@ const generateOrderConfirmationEmail = (order, user) => {
     `;
 };
 
-const nodemailer = require('nodemailer');
-
 const createTransporter = () => {
     return nodemailer.createTransport({
         host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -200,40 +988,6 @@ app.use(helmet({
     crossOriginEmbedderPolicy: false
 }));
 app.use(compression());
-
-const limiter = rateLimit({
-    windowMs: 1 * 60 * 1000, 
-    max: 100, 
-    message: {
-        error: 'Слишком много запросов, попробуйте позже'
-    },
-    skipSuccessfulRequests: true 
-});
-
-app.use('/api/', limiter);
-
-const cache = new Map();
-const CACHE_DURATION = {
-    SHORT: 1 * 60 * 1000, 
-    MEDIUM: 5 * 60 * 1000, 
-    LONG: 30 * 60 * 1000 
-};
-
-const withCache = (key, fetchFunction, duration = CACHE_DURATION.MEDIUM) => {
-    const cached = cache.get(key);
-    if (cached && Date.now() - cached.timestamp < duration) {
-        return Promise.resolve(cached.data);
-    }
-    
-    return fetchFunction().then(data => {
-        cache.set(key, {
-            data,
-            timestamp: Date.now()
-        });
-        return data;
-    });
-};
-
 
 app.use(cors({
     origin: function (origin, callback) {
@@ -305,35 +1059,6 @@ app.use('/static', express.static('static', {
     maxAge: '1d'
 }));
 
-if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
-if (!fs.existsSync('static')) fs.mkdirSync('static');
-
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, 'uploads/');
-    },
-    filename: (req, file, cb) => {
-        const timestamp = Date.now();
-        const originalName = file.originalname;
-        const safeName = originalName.replace(/[^a-zA-Z0-9.\-]/g, '_');
-        cb(null, `${timestamp}-${safeName}`);
-    }
-});
-
-const upload = multer({ 
-    storage,
-    fileFilter: (req, file, cb) => {
-        if (file.mimetype.startsWith('image/')) {
-            cb(null, true);
-        } else {
-            cb(new Error('Only image files are allowed'), false);
-        }
-    },
-    limits: {
-        fileSize: 5 * 1024 * 1024 
-    }
-});
-
 app.use('/images', (req, res, next) => {
     console.log(' Image request:', req.method, req.url);
     next();
@@ -394,40 +1119,548 @@ async function getConnection() {
     return await pool.getConnection();
 }
 
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    console.log(' Authentication Check:');
-    console.log('   - Header:', authHeader);
-    console.log('   - Token:', token ? `Present (${token.length} chars)` : 'Missing');
-
-    if (!token) {
-        console.log('   - Status: No token, proceeding as guest');
-        req.user = null; 
-        return next();
+const requireVerifiedEmail = (req, res, next) => {
+    if (!req.user) {
+        return res.status(401).json({ error: 'Требуется авторизация' });
     }
+    
+    if (!req.user.email_verified) {
+        return res.status(403).json({ 
+            error: 'Требуется подтверждение email для этого действия',
+            requiresEmailVerification: true 
+        });
+    }
+    
+    next();
+};
 
-    jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret-key', (err, user) => {
-        if (err) {
-            console.log('   - Status: Invalid token', err.message);
-            return res.status(403).json({ 
+app.get('/api/admin/stats', authenticateToken, requireAdmin, async (req, res) => {
+    let connection;
+    try {
+        console.log(' Admin stats request from:', req.user.email);
+        connection = await getConnection();
+        
+        const results = await Promise.allSettled([
+            connection.execute('SELECT COUNT(*) as count FROM products WHERE is_active = TRUE'),
+            connection.execute('SELECT COUNT(*) as count FROM orders'),
+            connection.execute('SELECT COUNT(*) as count FROM users'),
+            
+            connection.execute(`
+                SELECT COALESCE(SUM(total_amount), 0) as total_revenue 
+                FROM orders 
+                WHERE payment_status = 'paid'
+            `),
+            
+            connection.execute(`
+                SELECT COUNT(*) as today_orders 
+                FROM orders 
+                WHERE DATE(created_at) = CURDATE()
+            `),
+            
+            connection.execute(`
+                SELECT COALESCE(SUM(total_amount), 0) as monthly_revenue 
+                FROM orders 
+                WHERE payment_status = 'paid' 
+                AND MONTH(created_at) = MONTH(CURDATE()) 
+                AND YEAR(created_at) = YEAR(CURDATE())
+            `),
+            
+            connection.execute(`
+                SELECT o.*, u.name as customer_name 
+                FROM orders o 
+                LEFT JOIN users u ON o.user_id = u.id 
+                ORDER BY o.created_at DESC 
+                LIMIT 5
+            `),
+            
+            connection.execute(`
+                SELECT id, name, stock_quantity, price 
+                FROM products 
+                WHERE stock_quantity < 5 AND is_active = TRUE 
+                ORDER BY stock_quantity ASC 
+                LIMIT 10
+            `),
+            
+            connection.execute(`
+                SELECT p.id, p.name, 
+                COALESCE(SUM(oi.quantity), 0) as sales_count,
+                COALESCE(SUM(oi.quantity * oi.price), 0) as total_revenue
+                FROM products p
+                LEFT JOIN order_items oi ON p.id = oi.product_id
+                LEFT JOIN orders o ON oi.order_id = o.id AND o.payment_status = 'paid'
+                WHERE p.is_active = TRUE
+                GROUP BY p.id, p.name
+                ORDER BY sales_count DESC
+                LIMIT 5
+            `)
+        ]);
+
+        const [
+            productsCount, ordersCount, usersCount, revenueResult, 
+            todayOrdersResult, monthlyRevenueResult, recentOrders, 
+            lowStockProducts, popularProducts
+        ] = results.map(result => 
+            result.status === 'fulfilled' ? result.value : [[{ count: 0, total_revenue: 0, today_orders: 0, monthly_revenue: 0 }]]
+        );
+
+        const stats = {
+            totalProducts: productsCount[0][0]?.count || 0,
+            totalOrders: ordersCount[0][0]?.count || 0,
+            totalUsers: usersCount[0][0]?.count || 0,
+            totalRevenue: parseFloat(revenueResult[0][0]?.total_revenue) || 0,
+            todayOrders: todayOrdersResult[0][0]?.today_orders || 0,
+            monthlyRevenue: parseFloat(monthlyRevenueResult[0][0]?.monthly_revenue) || 0,
+            recentOrders: (recentOrders[0] || []).map(order => ({
+                ...order,
+                created_at: order.created_at ? order.created_at.toISOString() : new Date().toISOString()
+            })),
+            lowStockProducts: lowStockProducts[0] || [],
+            popularProducts: popularProducts[0] || []
+        };
+
+        console.log(' Admin stats generated successfully');
+
+        res.json({
+            success: true,
+            data: stats
+        });
+
+    } catch (error) {
+        console.error(' Admin Stats Error:', error);
+        
+        const fallbackStats = {
+            totalProducts: 0,
+            totalOrders: 0,
+            totalUsers: 0,
+            totalRevenue: 0,
+            todayOrders: 0,
+            monthlyRevenue: 0,
+            recentOrders: [],
+            lowStockProducts: [],
+            popularProducts: []
+        };
+        
+        res.json({
+            success: true,
+            data: fallbackStats
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/admin/brands', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const connection = await getConnection();
+        const [brands] = await connection.execute(`
+            SELECT b.*, 
+            COUNT(p.id) as products_count
+            FROM brands b
+            LEFT JOIN products p ON b.id = p.brand_id AND p.is_active = TRUE
+            GROUP BY b.id
+            ORDER BY b.name ASC
+        `);
+
+        res.json({
+            success: true,
+            data: brands
+        });
+
+    } catch (error) {
+        console.error('Admin Brands Error:', error);
+        res.status(500).json({ error: 'Ошибка получения брендов' });
+    }
+});
+
+app.get('/api/manager/reviews/moderation/stats', authenticateToken, requireManagerOrAdmin, async (req, res) => {
+    let connection;
+    try {
+        console.log('Manager fetching moderation stats');
+        
+        connection = await getConnection();
+        
+        const [stats] = await connection.execute(`
+            SELECT 
+                COUNT(*) as total_reviews,
+                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_reviews,
+                COUNT(CASE WHEN status = 'approved' THEN 1 END) as approved_reviews,
+                COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected_reviews
+            FROM reviews
+        `);
+        
+        console.log('Manager moderation stats:', stats[0]);
+        
+        res.json({
+            success: true,
+            data: stats[0]
+        });
+        
+    } catch (error) {
+        console.error('Manager get moderation stats error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка получения статистики модерации'
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/manager/reviews/moderation', authenticateToken, requireManagerOrAdmin, async (req, res) => {
+    let connection;
+    try {
+        const { status = 'pending' } = req.query;
+        
+        console.log('Manager fetching reviews for moderation with status:', status);
+        
+        connection = await getConnection();
+        
+        const query = `
+            SELECT 
+                r.*,
+                u.name as user_name,
+                u.email as user_email,
+                p.name as product_name,
+                rm.moderated_at,
+                rm.moderation_comment
+            FROM reviews r
+            JOIN users u ON r.user_id = u.id
+            JOIN products p ON r.product_id = p.id
+            LEFT JOIN review_moderation rm ON r.id = rm.review_id
+            WHERE r.status = ?
+            ORDER BY r.created_at DESC
+        `;
+        
+        const [reviews] = await connection.execute(query, [status]);
+        
+        console.log(`Manager found ${reviews.length} reviews for moderation`);
+        
+        res.json({
+            success: true,
+            data: {
+                reviews: reviews
+            }
+        });
+        
+    } catch (error) {
+        console.error('Manager get reviews for moderation error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка получения отзывов для модерации'
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/manager/products', authenticateToken, requireManagerOrAdmin, async (req, res) => {
+    console.log(' МЕНЕДЖЕР API Products запрос от:', req.user?.email);
+    
+    try {
+        const connection = await getConnection();
+        
+        const [products] = await connection.execute(`
+            SELECT p.*, c.name as category_name, b.name as brand_name 
+            FROM products p 
+            LEFT JOIN categories c ON p.category_id = c.id 
+            LEFT JOIN brands b ON p.brand_id = b.id 
+            ORDER BY p.created_at DESC
+        `);
+        
+        console.log(` Менеджер: Найдено товаров: ${products.length}`);
+        
+        const formattedProducts = products.map(product => ({
+            ...product,
+            images: product.images ? JSON.parse(product.images) : [],
+            finalPrice: product.discount_percent > 0 ? 
+                Math.round(product.price * (1 - product.discount_percent / 100)) : product.price
+        }));
+        
+        connection.release();
+        
+        res.json({
+            success: true,
+            data: formattedProducts
+        });
+        
+    } catch (error) {
+        console.error(' Manager Products Error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка получения товаров',
+            details: error.message
+        });
+    }
+});
+
+app.get('/api/admin/filters/stats', authenticateToken, requireManagerOrAdmin, async (req, res) => {
+    let connection;
+    try {
+        console.log('Fetching filter stats for manager/admin');
+        connection = await getConnection();
+        
+        const [materialStats] = await connection.execute(`
+            SELECT material, COUNT(*) as product_count 
+            FROM products 
+            WHERE material IS NOT NULL AND material != '' AND is_active = TRUE
+            GROUP BY material 
+            ORDER BY product_count DESC
+        `);
+        
+        const [colorStats] = await connection.execute(`
+            SELECT color, COUNT(*) as product_count 
+            FROM products 
+            WHERE color IS NOT NULL AND color != '' AND is_active = TRUE
+            GROUP BY color 
+            ORDER BY product_count DESC
+        `);
+        
+        const [brandStats] = await connection.execute(`
+            SELECT b.id, b.name, COUNT(p.id) as product_count 
+            FROM brands b
+            LEFT JOIN products p ON b.id = p.brand_id AND p.is_active = TRUE
+            GROUP BY b.id, b.name
+            ORDER BY product_count DESC
+        `);
+        
+        const [categoryStats] = await connection.execute(`
+            SELECT c.id, c.name, COUNT(p.id) as product_count 
+            FROM categories c
+            LEFT JOIN products p ON c.id = p.category_id AND p.is_active = TRUE
+            GROUP BY c.id, c.name
+            ORDER BY product_count DESC
+        `);
+        
+        connection.release();
+        
+        res.json({
+            success: true,
+            data: {
+                materials: materialStats,
+                colors: colorStats,
+                brands: brandStats,
+                categories: categoryStats
+            }
+        });
+        
+    } catch (error) {
+        console.error('Filter stats error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка получения статистики фильтров'
+        });
+    }
+});
+
+app.get('/api/admin/filters/categories-stats', authenticateToken, requireAdmin, async (req, res) => {
+    let connection;
+    try {
+        connection = await getConnection();
+        
+        const [categoryStats] = await connection.execute(`
+            SELECT c.id, c.name, c.description, COUNT(p.id) as product_count 
+            FROM categories c
+            LEFT JOIN products p ON c.id = p.category_id AND p.is_active = TRUE
+            GROUP BY c.id, c.name, c.description
+            ORDER BY product_count DESC
+        `);
+        
+        connection.release();
+        
+        res.json({
+            success: true,
+            data: categoryStats
+        });
+        
+    } catch (error) {
+        console.error('Category stats error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка получения статистики категорий'
+        });
+    }
+});
+
+app.post('/api/admin/filters/materials/cleanup', authenticateToken, requireManagerOrAdmin, async (req, res) => {
+    let connection;
+    try {
+        const { materialsToRemove } = req.body;
+        
+        if (!materialsToRemove || !Array.isArray(materialsToRemove)) {
+            return res.status(400).json({ 
                 success: false,
-                error: 'Неверный токен',
-                details: err.message 
+                error: 'Неверный формат данных' 
+            });
+        }
+
+        connection = await getConnection();
+        
+        let updatedCount = 0;
+        for (const material of materialsToRemove) {
+            const [result] = await connection.execute(
+                'UPDATE products SET material = NULL WHERE material = ? AND is_active = TRUE',
+                [material]
+            );
+            updatedCount += result.affectedRows;
+        }
+        
+        connection.release();
+        
+        res.json({
+            success: true,
+            message: `Удалено ${materialsToRemove.length} материалов, обновлено ${updatedCount} товаров`,
+            updatedCount
+        });
+        
+    } catch (error) {
+        console.error('Materials cleanup error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка очистки материалов' 
+        });
+    }
+});
+
+app.post('/api/admin/filters/colors/cleanup', authenticateToken, requireManagerOrAdmin, async (req, res) => {
+    let connection;
+    try {
+        const { colorsToRemove } = req.body;
+        
+        if (!colorsToRemove || !Array.isArray(colorsToRemove)) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Неверный формат данных' 
+            });
+        }
+
+        connection = await getConnection();
+        
+        let updatedCount = 0;
+        for (const color of colorsToRemove) {
+            const [result] = await connection.execute(
+                'UPDATE products SET color = NULL WHERE color = ? AND is_active = TRUE',
+                [color]
+            );
+            updatedCount += result.affectedRows;
+        }
+        
+        connection.release();
+        
+        res.json({
+            success: true,
+            message: `Удалено ${colorsToRemove.length} цветов, обновлено ${updatedCount} товаров`,
+            updatedCount
+        });
+        
+    } catch (error) {
+        console.error('Colors cleanup error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка очистки цветов' 
+        });
+    }
+});
+
+app.get('/api/user/me', authenticateToken, async (req, res) => {
+    try {
+        const connection = await getConnection();
+        const [users] = await connection.execute(
+            'SELECT id, email, name, phone, role, email_verified, created_at FROM users WHERE id = ?',
+            [req.user.id]
+        );
+        
+        connection.release();
+        
+        if (users.length === 0) {
+            return res.status(404).json({ error: 'Пользователь не найден' });
+        }
+        
+        const user = users[0];
+        
+        res.json({
+            success: true,
+            data: user
+        });
+        
+    } catch (error) {
+        console.error('Get user info error:', error);
+        res.status(500).json({ error: 'Ошибка получения информации о пользователе' });
+    }
+});
+
+app.post('/api/user/check-permission', authenticateToken, async (req, res) => {
+    try {
+        const { permission } = req.body;
+        
+        if (!permission) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Укажите право для проверки' 
             });
         }
         
-        console.log('   - Status: Valid token for user:', user.email);
-        req.user = user;
-        next();
-    });
-};
+        const userPermissions = getUserPermissions(req.user.role);
+        const hasPermission = userPermissions.includes(permission);
+        
+        res.json({
+            success: true,
+            data: {
+                hasPermission: hasPermission,
+                permission: permission,
+                role: req.user.role
+            }
+        });
+        
+    } catch (error) {
+        console.error('Check permission error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка проверки прав' 
+        });
+    }
+});
+
+app.get('/api/admin/roles', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const roles = [
+            {
+                value: 'user',
+                label: 'Пользователь',
+                permissions: PERMISSIONS.USER,
+                description: 'Обычный пользователь с базовыми правами'
+            },
+            {
+                value: 'manager', 
+                label: 'Менеджер',
+                permissions: PERMISSIONS.MANAGER,
+                description: 'Менеджер с правами на управление товарами и модерацию'
+            },
+            {
+                value: 'admin',
+                label: 'Администратор', 
+                permissions: PERMISSIONS.ADMIN,
+                description: 'Полный доступ ко всем функциям системы'
+            }
+        ];
+        
+        res.json({
+            success: true,
+            data: roles
+        });
+        
+    } catch (error) {
+        console.error('Get roles error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка получения списка ролей' 
+        });
+    }
+});
+
+console.log(' Система ролей и прав доступа инициализирована');
 
 app.get('/api/profile', authenticateToken, async (req, res) => {
     try {
-        console.log('👤 Profile request for user:', req.user?.id);
-        
         if (!req.user) {
             return res.status(401).json({ 
                 success: false,
@@ -435,7 +1668,7 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
             });
         }
 
-        const connection = await pool.getConnection();
+        const connection = await getConnection();
         const [users] = await connection.execute(
             'SELECT id, email, name, phone, role, created_at FROM users WHERE id = ?',
             [req.user.id]
@@ -454,6 +1687,86 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
     }
 });
 
+app.get('/api/basket', authenticateToken, async (req, res) => {
+    try {
+        if (!req.user) {
+            return res.status(401).json({ error: 'Требуется авторизация' });
+        }
+
+        const connection = await getConnection();
+        const [items] = await connection.execute(
+            `SELECT c.*, p.name, p.price, p.images, p.stock_quantity, p.discount_percent
+            FROM cart c 
+            JOIN products p ON c.product_id = p.id 
+            WHERE c.user_id = ?`,
+            [req.user.id]
+        );
+        
+        const formattedItems = items.map(item => ({
+            ...item,
+            images: item.images ? JSON.parse(item.images) : [],
+            finalPrice: item.discount_percent > 0 ? 
+                Math.round(item.price * (1 - item.discount_percent / 100)) : item.price
+        }));
+        
+        const totalAmount = formattedItems.reduce((sum, item) => 
+            sum + (item.finalPrice * item.quantity), 0
+        );
+        
+        res.json({
+            success: true,
+            data: {
+                items: formattedItems,
+                summary: {
+                    totalAmount,
+                    totalItems: formattedItems.length
+                }
+            }
+        });
+    } catch (error) {
+        console.error('Ошибка получения корзины:', error);
+        res.status(500).json({ error: 'Ошибка сервера' });
+    }
+});
+
+app.get('/api/favorites', authenticateToken, async (req, res) => {
+    try {
+        if (!req.user) {
+            return res.status(401).json({ error: 'Требуется авторизация' });
+        }
+
+        const connection = await getConnection();
+        
+        const [favorites] = await connection.execute(`
+            SELECT f.*, p.name, p.price, p.images, p.discount_percent, p.stock_quantity,
+                c.name as category_name, b.name as brand_name
+            FROM favorites f
+            JOIN products p ON f.product_id = p.id
+            LEFT JOIN categories c ON p.category_id = c.id
+            LEFT JOIN brands b ON p.brand_id = b.id
+            WHERE f.user_id = ? AND p.is_active = TRUE
+            ORDER BY f.created_at DESC
+        `, [req.user.id]);
+        
+        connection.release();
+        
+        const formattedFavorites = favorites.map(item => ({
+            ...item,
+            images: item.images ? JSON.parse(item.images) : [],
+            finalPrice: item.discount_percent > 0 ? 
+                Math.round(item.price * (1 - item.discount_percent / 100)) : item.price
+        }));
+        
+        res.json({
+            success: true,
+            data: formattedFavorites
+        });
+        
+    } catch (error) {
+        console.error('Get favorites error:', error);
+        res.status(500).json({ error: 'Ошибка получения избранного' });
+    }
+});
 
 app.get('/images/:filename', (req, res) => {
     const filename = req.params.filename;
@@ -497,7 +1810,6 @@ app.get('/images/thumb/:filename', (req, res) => {
     
     res.sendFile(filePath);
 });
-
 
 app.get('/api/homepage-data', async (req, res) => {
     try {
@@ -997,67 +2309,6 @@ app.post('/api/payments/yookassa-webhook', express.json(), async (req, res) => {
     }
 });
 
-
-app.post('/api/auth/register', async (req, res) => {
-    try {
-        const { email, phone, password, name } = req.body;
-        const connection = await pool.getConnection();
-        
-        const [existing] = await connection.execute(
-            'SELECT id FROM users WHERE email = ?',
-            [email]
-        );
-        
-        if (existing.length > 0) {
-            connection.release();
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Пользователь с таким email уже существует' 
-            });
-        }
-        
-        const hashedPassword = await bcrypt.hash(password, 10);
-        
-        const [result] = await connection.execute(
-            'INSERT INTO users (email, phone, password, name) VALUES (?, ?, ?, ?)',
-            [email, phone, hashedPassword, name]
-        );
-
-        const token = jwt.sign(
-            { 
-                id: result.insertId, 
-                email: email, 
-                role: 'user' 
-            },
-            process.env.JWT_SECRET || 'fallback-secret-key',
-            { expiresIn: '24h' }
-        );
-
-        const [users] = await connection.execute(
-            'SELECT id, email, name, phone, role, created_at FROM users WHERE id = ?',
-            [result.insertId]
-        );
-        
-        connection.release();
-        
-        res.json({ 
-            success: true,
-            data: {
-                token,
-                user: users[0]
-            },
-            message: 'Пользователь успешно зарегистрирован' 
-        });
-        
-    } catch (error) {
-        console.error('Ошибка регистрации:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Ошибка сервера' 
-        });
-    }
-});
-
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -1098,64 +2349,6 @@ app.post('/api/auth/login', async (req, res) => {
     } catch (error) {
         console.error('Ошибка входа:', error);
         res.status(500).json({ success: false, error: 'Ошибка сервера' });
-    }
-});
-
-app.get('/api/profile', authenticateToken, async (req, res) => {
-    try {
-        const connection = await pool.getConnection();
-        const [users] = await connection.execute(
-            'SELECT id, email, name, phone, role, created_at FROM users WHERE id = ?',
-            [req.user.id]
-        );
-        
-        if (users.length === 0) {
-            return res.status(404).json({ error: 'Пользователь не найден' });
-        }
-        
-        res.json(users[0]);
-    } catch (error) {
-        console.error('Ошибка получения профиля:', error);
-        res.status(500).json({ error: 'Ошибка сервера' });
-    }
-});
-
-app.get('/api/favorites', authenticateToken, async (req, res) => {
-    try {
-        if (!req.user) {
-            return res.status(401).json({ error: 'Требуется авторизация' });
-        }
-
-        const connection = await getConnection();
-        
-        const [favorites] = await connection.execute(`
-            SELECT f.*, p.name, p.price, p.images, p.discount_percent, p.stock_quantity,
-                c.name as category_name, b.name as brand_name
-            FROM favorites f
-            JOIN products p ON f.product_id = p.id
-            LEFT JOIN categories c ON p.category_id = c.id
-            LEFT JOIN brands b ON p.brand_id = b.id
-            WHERE f.user_id = ? AND p.is_active = TRUE
-            ORDER BY f.created_at DESC
-        `, [req.user.id]);
-        
-        connection.release();
-        
-        const formattedFavorites = favorites.map(item => ({
-            ...item,
-            images: item.images ? JSON.parse(item.images) : [],
-            finalPrice: item.discount_percent > 0 ? 
-                Math.round(item.price * (1 - item.discount_percent / 100)) : item.price
-        }));
-        
-        res.json({
-            success: true,
-            data: formattedFavorites
-        });
-        
-    } catch (error) {
-        console.error('Get favorites error:', error);
-        res.status(500).json({ error: 'Ошибка получения избранного' });
     }
 });
 
@@ -1267,49 +2460,6 @@ app.get('/api/favorites/check/:productId', authenticateToken, async (req, res) =
     }
 });
 
-
-app.get('/api/basket', authenticateToken, async (req, res) => {
-    try {
-        if (!req.user) {
-            return res.status(401).json({ error: 'Требуется авторизация' });
-        }
-
-        const connection = await pool.getConnection();
-        const [items] = await connection.execute(
-            `SELECT c.*, p.name, p.price, p.images, p.stock_quantity, p.discount_percent
-            FROM cart c 
-            JOIN products p ON c.product_id = p.id 
-            WHERE c.user_id = ?`,
-            [req.user.id]
-        );
-        
-        const formattedItems = items.map(item => ({
-            ...item,
-            images: item.images ? JSON.parse(item.images) : [],
-            finalPrice: item.discount_percent > 0 ? 
-                Math.round(item.price * (1 - item.discount_percent / 100)) : item.price
-        }));
-        
-        const totalAmount = formattedItems.reduce((sum, item) => 
-            sum + (item.finalPrice * item.quantity), 0
-        );
-        
-        res.json({
-            success: true,
-            data: {
-                items: formattedItems,
-                summary: {
-                    totalAmount,
-                    totalItems: formattedItems.length
-                }
-            }
-        });
-    } catch (error) {
-        console.error('Ошибка получения корзины:', error);
-        res.status(500).json({ error: 'Ошибка сервера' });
-    }
-});
-
 app.post('/api/basket', authenticateToken, async (req, res) => {
     try {
         if (!req.user) {
@@ -1319,7 +2469,6 @@ app.post('/api/basket', authenticateToken, async (req, res) => {
         const { product_id, quantity = 1 } = req.body;
         const connection = await pool.getConnection();
 
-        // Получаем информацию о товаре
         const [products] = await connection.execute(
             'SELECT * FROM products WHERE id = ? AND is_active = TRUE',
             [product_id]
@@ -1332,7 +2481,6 @@ app.post('/api/basket', authenticateToken, async (req, res) => {
         
         const product = products[0];
         
-        // ВАЛИДАЦИЯ: проверяем доступное количество
         if (quantity > product.stock_quantity) {
             connection.release();
             return res.status(400).json({ 
@@ -1340,8 +2488,7 @@ app.post('/api/basket', authenticateToken, async (req, res) => {
             });
         }
         
-        // Проверяем, не превышает ли запрашиваемое количество максимальный лимит
-        const maxQuantity = Math.min(product.stock_quantity, 100); // максимум 100 шт за раз
+        const maxQuantity = Math.min(product.stock_quantity, 100); 
         const actualQuantity = Math.min(quantity, maxQuantity);
         
         const [existing] = await connection.execute(
@@ -1350,7 +2497,6 @@ app.post('/api/basket', authenticateToken, async (req, res) => {
         );
         
         if (existing.length > 0) {
-            // Проверяем, не превысит ли общее количество доступное на складе
             const newTotalQuantity = existing[0].quantity + actualQuantity;
             if (newTotalQuantity > product.stock_quantity) {
                 connection.release();
@@ -1446,7 +2592,6 @@ app.delete('/api/basket/:productId', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'Ошибка сервера' });
     }
 });
-
 
 app.post('/api/orders', authenticateToken, async (req, res) => {
     let connection;
@@ -1644,82 +2789,77 @@ app.post('/api/orders/:id/send-email', authenticateToken, async (req, res) => {
 
 app.get('/api/products/:id/reviews', async (req, res) => {
     try {
-        const { id } = req.params
-        const connection = await getConnection()
+        const { id } = req.params;
+        const connection = await getConnection();
         
         const [reviews] = await connection.execute(`
-            SELECT r.*, u.name as user_name 
+            SELECT 
+                r.*, 
+                u.name as user_name,
+                rm.moderated_at,
+                rm.moderation_comment
             FROM reviews r 
             LEFT JOIN users u ON r.user_id = u.id 
-            WHERE r.product_id = ? 
+            LEFT JOIN review_moderation rm ON r.id = rm.review_id
+            WHERE r.product_id = ? AND r.status = 'approved'
             ORDER BY r.created_at DESC
-        `, [id])
+        `, [id]);
         
-        connection.release()
+        connection.release();
         
         res.json({
             success: true,
             data: reviews
-        })
+        });
         
     } catch (error) {
-        console.error('Get reviews error:', error)
-        res.status(500).json({ error: 'Ошибка получения отзывов' })
+        console.error('Get reviews error:', error);
+        res.status(500).json({ error: 'Ошибка получения отзывов' });
     }
-})
+});
 
 app.post('/api/products/:id/reviews', authenticateToken, async (req, res) => {
     try {
-        const { id } = req.params
-        const { rating, comment } = req.body
+        const { id } = req.params;
+        const { rating, comment } = req.body;
         
         if (!req.user) {
-            return res.status(401).json({ error: 'Требуется авторизация' })
+            return res.status(401).json({ error: 'Требуется авторизация' });
         }
         
         if (!rating || rating < 1 || rating > 5) {
-            return res.status(400).json({ error: 'Рейтинг должен быть от 1 до 5' })
+            return res.status(400).json({ error: 'Рейтинг должен быть от 1 до 5' });
         }
 
-        const connection = await getConnection()
+        const connection = await getConnection();
         
         const [existingReviews] = await connection.execute(
             'SELECT id FROM reviews WHERE product_id = ? AND user_id = ?',
             [id, req.user.id]
-        )
+        );
         
         if (existingReviews.length > 0) {
-            connection.release()
-            return res.status(400).json({ error: 'Вы уже оставляли отзыв на этот товар' })
+            connection.release();
+            return res.status(400).json({ error: 'Вы уже оставляли отзыв на этот товар' });
         }
         
         await connection.execute(
-            'INSERT INTO reviews (product_id, user_id, rating, comment) VALUES (?, ?, ?, ?)',
+            'INSERT INTO reviews (product_id, user_id, rating, comment, status) VALUES (?, ?, ?, ?, "pending")',
             [id, req.user.id, rating, comment]
-        )
+        );
         
-        const [avgResult] = await connection.execute(`
-            SELECT AVG(rating) as avg_rating, COUNT(*) as review_count 
-            FROM reviews 
-            WHERE product_id = ?
-        `, [id])
-        
-        connection.release()
+        connection.release();
         
         res.json({
             success: true,
-            message: 'Отзыв добавлен успешно',
-            data: {
-                rating: parseFloat(avgResult[0].avg_rating) || 0,
-                reviewCount: avgResult[0].review_count || 0
-            }
-        })
+            message: 'Отзыв добавлен и отправлен на модерацию'
+        });
         
     } catch (error) {
-        console.error('Add review error:', error)
-        res.status(500).json({ error: 'Ошибка добавления отзыва' })
+        console.error('Add review error:', error);
+        res.status(500).json({ error: 'Ошибка добавления отзыва' });
     }
-})
+});
 
 app.get('/api/products/:id/rating', async (req, res) => {
     try {
@@ -1763,8 +2903,6 @@ app.get('/api/products/:id/rating', async (req, res) => {
         res.status(500).json({ error: 'Ошибка получения рейтинга' })
     }
 })
-
-
 
 app.put('/api/admin/products/:id/status', authenticateToken, requireAdmin, async (req, res) => {
     try {
@@ -2033,7 +3171,6 @@ app.get('/api/orders/:id', authenticateToken, async (req, res) => {
     }
 });
 
-
 app.get('/api/categories', async (req, res) => {
     try {
         const connection = await getConnection();
@@ -2229,10 +3366,9 @@ app.get('/api/products/:id', async (req, res) => {
             error: 'Ошибка сервера' 
         });
     }
-});
+}); 
 
-app.put('/api/admin/products/:id', authenticateToken, requireAdmin, upload.array('images', 5), async (req, res) => {
-    try {
+app.put('/api/admin/products/:id', authenticateToken, requireManagerOrAdmin, upload.array('images', 5), async (req, res) => {
         const { id } = req.params;
         const { name, price, description, category_id, brand_id, stock_quantity, material, color } = req.body; 
         
@@ -2278,12 +3414,7 @@ app.put('/api/admin/products/:id', authenticateToken, requireAdmin, upload.array
             }
         });
 
-    } catch (error) {
-        console.error('Ошибка обновления товара:', error);
-        res.status(500).json({ error: 'Ошибка сервера при обновлении товара' });
-    }
 });
-
 
 app.get('/api/admin/products/:id/check', authenticateToken, requireAdmin, async (req, res) => {
     try {
@@ -2436,122 +3567,6 @@ app.get('/api/admin/products', authenticateToken, requireAdmin, async (req, res)
             error: 'Ошибка получения товаров',
             details: error.message
         });
-    }
-});
-
-
-app.get('/api/admin/stats', authenticateToken, requireAdmin, async (req, res) => {
-    let connection;
-    try {
-        console.log(' Admin stats request from:', req.user.email);
-        connection = await getConnection();
-        
-        const results = await Promise.allSettled([
-            connection.execute('SELECT COUNT(*) as count FROM products WHERE is_active = TRUE'),
-            connection.execute('SELECT COUNT(*) as count FROM orders'),
-            connection.execute('SELECT COUNT(*) as count FROM users'),
-            
-            connection.execute(`
-                SELECT COALESCE(SUM(total_amount), 0) as total_revenue 
-                FROM orders 
-                WHERE payment_status = 'paid'
-            `),
-            
-            connection.execute(`
-                SELECT COUNT(*) as today_orders 
-                FROM orders 
-                WHERE DATE(created_at) = CURDATE()
-            `),
-            
-            connection.execute(`
-                SELECT COALESCE(SUM(total_amount), 0) as monthly_revenue 
-                FROM orders 
-                WHERE payment_status = 'paid' 
-                AND MONTH(created_at) = MONTH(CURDATE()) 
-                AND YEAR(created_at) = YEAR(CURDATE())
-            `),
-            
-            connection.execute(`
-                SELECT o.*, u.name as customer_name 
-                FROM orders o 
-                LEFT JOIN users u ON o.user_id = u.id 
-                ORDER BY o.created_at DESC 
-                LIMIT 5
-            `),
-            
-            connection.execute(`
-                SELECT id, name, stock_quantity, price 
-                FROM products 
-                WHERE stock_quantity < 5 AND is_active = TRUE 
-                ORDER BY stock_quantity ASC 
-                LIMIT 10
-            `),
-            
-            connection.execute(`
-                SELECT p.id, p.name, 
-                COALESCE(SUM(oi.quantity), 0) as sales_count,
-                COALESCE(SUM(oi.quantity * oi.price), 0) as total_revenue
-                FROM products p
-                LEFT JOIN order_items oi ON p.id = oi.product_id
-                LEFT JOIN orders o ON oi.order_id = o.id AND o.payment_status = 'paid'
-                WHERE p.is_active = TRUE
-                GROUP BY p.id, p.name
-                ORDER BY sales_count DESC
-                LIMIT 5
-            `)
-        ]);
-
-        const [
-            productsCount, ordersCount, usersCount, revenueResult, 
-            todayOrdersResult, monthlyRevenueResult, recentOrders, 
-            lowStockProducts, popularProducts
-        ] = results.map(result => 
-            result.status === 'fulfilled' ? result.value : [[{ count: 0, total_revenue: 0, today_orders: 0, monthly_revenue: 0 }]]
-        );
-
-        const stats = {
-            totalProducts: productsCount[0][0]?.count || 0,
-            totalOrders: ordersCount[0][0]?.count || 0,
-            totalUsers: usersCount[0][0]?.count || 0,
-            totalRevenue: parseFloat(revenueResult[0][0]?.total_revenue) || 0,
-            todayOrders: todayOrdersResult[0][0]?.today_orders || 0,
-            monthlyRevenue: parseFloat(monthlyRevenueResult[0][0]?.monthly_revenue) || 0,
-            recentOrders: (recentOrders[0] || []).map(order => ({
-                ...order,
-                created_at: order.created_at ? order.created_at.toISOString() : new Date().toISOString()
-            })),
-            lowStockProducts: lowStockProducts[0] || [],
-            popularProducts: popularProducts[0] || []
-        };
-
-        console.log(' Admin stats generated successfully');
-
-        res.json({
-            success: true,
-            data: stats
-        });
-
-    } catch (error) {
-        console.error(' Admin Stats Error:', error);
-        
-        const fallbackStats = {
-            totalProducts: 0,
-            totalOrders: 0,
-            totalUsers: 0,
-            totalRevenue: 0,
-            todayOrders: 0,
-            monthlyRevenue: 0,
-            recentOrders: [],
-            lowStockProducts: [],
-            popularProducts: []
-        };
-        
-        res.json({
-            success: true,
-            data: fallbackStats
-        });
-    } finally {
-        if (connection) connection.release();
     }
 });
 
@@ -2721,7 +3736,6 @@ app.put('/api/admin/orders/:id/status', authenticateToken, requireAdmin, async (
     }
 });
 
-
 app.get('/api/admin/categories', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const connection = await getConnection();
@@ -2748,7 +3762,7 @@ app.get('/api/admin/categories', authenticateToken, requireAdmin, async (req, re
     }
 });
 
-app.post('/api/admin/products', authenticateToken, requireAdmin, upload.array('images', 10), async (req, res) => {
+app.post('/api/admin/products', authenticateToken, requireManagerOrAdmin, upload.array('images', 10), async (req, res) => {
     let connection;
     try {
         console.log('CREATE PRODUCT REQUEST received');
@@ -3019,174 +4033,7 @@ app.delete('/api/admin/categories/:id', authenticateToken, requireAdmin, async (
     }
 });
 
-app.get('/api/admin/filters/categories-stats', authenticateToken, requireAdmin, async (req, res) => {
-    let connection;
-    try {
-        connection = await getConnection();
-        
-        const [categoryStats] = await connection.execute(`
-            SELECT c.id, c.name, c.description, COUNT(p.id) as product_count 
-            FROM categories c
-            LEFT JOIN products p ON c.id = p.category_id AND p.is_active = TRUE
-            GROUP BY c.id, c.name, c.description
-            ORDER BY product_count DESC
-        `);
-        
-        connection.release();
-        
-        res.json({
-            success: true,
-            data: categoryStats
-        });
-        
-    } catch (error) {
-        console.error('Category stats error:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'Ошибка получения статистики категорий'
-        });
-    }
-});
-
-app.get('/api/admin/filters/stats', authenticateToken, requireAdmin, async (req, res) => {
-    let connection;
-    try {
-        connection = await getConnection();
-        
-        const [materialStats] = await connection.execute(`
-            SELECT material, COUNT(*) as product_count 
-            FROM products 
-            WHERE material IS NOT NULL AND material != '' AND is_active = TRUE
-            GROUP BY material 
-            ORDER BY product_count DESC
-        `);
-        
-        const [colorStats] = await connection.execute(`
-            SELECT color, COUNT(*) as product_count 
-            FROM products 
-            WHERE color IS NOT NULL AND color != '' AND is_active = TRUE
-            GROUP BY color 
-            ORDER BY product_count DESC
-        `);
-        
-        const [brandStats] = await connection.execute(`
-            SELECT b.id, b.name, COUNT(p.id) as product_count 
-            FROM brands b
-            LEFT JOIN products p ON b.id = p.brand_id AND p.is_active = TRUE
-            GROUP BY b.id, b.name
-            ORDER BY product_count DESC
-        `);
-        
-        const [categoryStats] = await connection.execute(`
-            SELECT c.id, c.name, COUNT(p.id) as product_count 
-            FROM categories c
-            LEFT JOIN products p ON c.id = p.category_id AND p.is_active = TRUE
-            GROUP BY c.id, c.name
-            ORDER BY product_count DESC
-        `);
-        
-        connection.release();
-        
-        res.json({
-            success: true,
-            data: {
-                materials: materialStats,
-                colors: colorStats,
-                brands: brandStats,
-                categories: categoryStats
-            }
-        });
-        
-    } catch (error) {
-        console.error('Filter stats error:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'Ошибка получения статистики фильтров'
-        });
-    }
-});
-
-app.post('/api/admin/filters/materials/cleanup', authenticateToken, requireAdmin, async (req, res) => {
-    let connection;
-    try {
-        const { materialsToRemove } = req.body;
-        
-        if (!materialsToRemove || !Array.isArray(materialsToRemove)) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'Неверный формат данных' 
-            });
-        }
-
-        connection = await getConnection();
-        
-        let updatedCount = 0;
-        for (const material of materialsToRemove) {
-            const [result] = await connection.execute(
-                'UPDATE products SET material = NULL WHERE material = ? AND is_active = TRUE',
-                [material]
-            );
-            updatedCount += result.affectedRows;
-        }
-        
-        connection.release();
-        
-        res.json({
-            success: true,
-            message: `Удалено ${materialsToRemove.length} материалов, обновлено ${updatedCount} товаров`,
-            updatedCount
-        });
-        
-    } catch (error) {
-        console.error('Materials cleanup error:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'Ошибка очистки материалов' 
-        });
-    }
-});
-
-app.post('/api/admin/filters/colors/cleanup', authenticateToken, requireAdmin, async (req, res) => {
-    let connection;
-    try {
-        const { colorsToRemove } = req.body;
-        
-        if (!colorsToRemove || !Array.isArray(colorsToRemove)) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'Неверный формат данных' 
-            });
-        }
-
-        connection = await getConnection();
-        
-        let updatedCount = 0;
-        for (const color of colorsToRemove) {
-            const [result] = await connection.execute(
-                'UPDATE products SET color = NULL WHERE color = ? AND is_active = TRUE',
-                [color]
-            );
-            updatedCount += result.affectedRows;
-        }
-        
-        connection.release();
-        
-        res.json({
-            success: true,
-            message: `Удалено ${colorsToRemove.length} цветов, обновлено ${updatedCount} товаров`,
-            updatedCount
-        });
-        
-    } catch (error) {
-        console.error('Colors cleanup error:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'Ошибка очистки цветов' 
-        });
-    }
-});
-
-app.delete('/api/admin/filters/materials/:material', authenticateToken, requireAdmin, async (req, res) => {
+app.delete('/api/admin/filters/materials/:material', authenticateToken, requireManagerOrAdmin, async (req, res) => {
     let connection;
     try {
         const { material } = req.params;
@@ -3215,7 +4062,7 @@ app.delete('/api/admin/filters/materials/:material', authenticateToken, requireA
     }
 });
 
-app.delete('/api/admin/filters/colors/:color', authenticateToken, requireAdmin, async (req, res) => {
+app.delete('/api/admin/filters/colors/:color', authenticateToken, requireManagerOrAdmin, async (req, res) => {
     let connection;
     try {
         const { color } = req.params;
@@ -3241,30 +4088,6 @@ app.delete('/api/admin/filters/colors/:color', authenticateToken, requireAdmin, 
             success: false,
             error: 'Ошибка удаления цвета' 
         });
-    }
-});
-
-
-app.get('/api/admin/brands', authenticateToken, requireAdmin, async (req, res) => {
-    try {
-        const connection = await getConnection();
-        const [brands] = await connection.execute(`
-            SELECT b.*, 
-            COUNT(p.id) as products_count
-            FROM brands b
-            LEFT JOIN products p ON b.id = p.brand_id AND p.is_active = TRUE
-            GROUP BY b.id
-            ORDER BY b.name ASC
-        `);
-
-        res.json({
-            success: true,
-            data: brands
-        });
-
-    } catch (error) {
-        console.error('Admin Brands Error:', error);
-        res.status(500).json({ error: 'Ошибка получения брендов' });
     }
 });
 
@@ -3382,7 +4205,6 @@ app.delete('/api/admin/brands/:id', authenticateToken, requireAdmin, async (req,
     }
 });
 
-
 app.post('/api/payments/create-test', authenticateToken, async (req, res) => {
     try {
         const { orderId, amount } = req.body;
@@ -3408,7 +4230,6 @@ app.post('/api/payments/create-test', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'Ошибка тестового платежа' });
     }
 });
-
 
 app.delete('/api/admin/categories/:id/force', authenticateToken, requireAdmin, async (req, res) => {
     let connection;
@@ -3539,7 +4360,6 @@ app.post('/api/admin/cleanup/orphans', authenticateToken, requireAdmin, async (r
     }
 });
 
-
 app.get('/api/debug-routes', (req, res) => {
     const routes = [
         '/api/homepage-data',
@@ -3560,6 +4380,194 @@ app.get('/api/debug-routes', (req, res) => {
         routes: routes,
         architecture: 'API Gateway + Microservices'
     });
+});
+
+app.get('/api/admin/reviews/moderation', authenticateToken, requireAdmin, async (req, res) => {
+    let connection;
+    try {
+        const { status = 'pending' } = req.query;
+        
+        console.log('Admin fetching reviews for moderation with status:', status);
+        
+        connection = await getConnection();
+        
+        const query = `
+            SELECT 
+                r.*,
+                u.name as user_name,
+                u.email as user_email,
+                p.name as product_name,
+                rm.moderated_at,
+                rm.moderation_comment
+            FROM reviews r
+            JOIN users u ON r.user_id = u.id
+            JOIN products p ON r.product_id = p.id
+            LEFT JOIN review_moderation rm ON r.id = rm.review_id
+            WHERE r.status = ?
+            ORDER BY r.created_at DESC
+        `;
+        
+        const [reviews] = await connection.execute(query, [status]);
+        
+        console.log(`Admin found ${reviews.length} reviews for moderation`);
+        
+        res.json({
+            success: true,
+            data: {
+                reviews: reviews
+            }
+        });
+        
+    } catch (error) {
+        console.error('Admin get reviews for moderation error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка получения отзывов для модерации'
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.post('/api/admin/reviews/:reviewId/approve', authenticateToken, requireManagerOrAdmin, async (req, res) => {
+    let connection;
+    try {
+        const { reviewId } = req.params;
+        const { moderation_comment = 'Одобрено менеджером' } = req.body;
+        
+        console.log('Approving review:', reviewId);
+        
+        connection = await getConnection();
+        
+        const [reviews] = await connection.execute(
+            'SELECT * FROM reviews WHERE id = ?',
+            [reviewId]
+        );
+        
+        if (reviews.length === 0) {
+            return res.status(404).json({ 
+                success: false,
+                error: 'Отзыв не найден' 
+            });
+        }
+        
+        await connection.execute(
+            'UPDATE reviews SET status = "approved" WHERE id = ?',
+            [reviewId]
+        );
+        
+        await connection.execute(
+            'INSERT INTO review_moderation (review_id, moderator_id, status, moderation_comment, moderated_at) VALUES (?, ?, "approved", ?, NOW())',
+            [reviewId, req.user.id, moderation_comment]
+        );
+        
+        console.log('Review approved successfully');
+        
+        res.json({
+            success: true,
+            message: 'Отзыв одобрен и опубликован'
+        });
+        
+    } catch (error) {
+        console.error('Approve review error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка одобрения отзыва'
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.post('/api/admin/reviews/:reviewId/reject', authenticateToken, requireManagerOrAdmin, async (req, res) => {
+    let connection;
+    try {
+        const { reviewId } = req.params;
+        const { moderation_comment } = req.body;
+        
+        console.log('Rejecting review:', reviewId);
+        
+        if (!moderation_comment) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Укажите причину отклонения' 
+            });
+        }
+        
+        connection = await getConnection();
+        
+        const [reviews] = await connection.execute(
+            'SELECT * FROM reviews WHERE id = ?',
+            [reviewId]
+        );
+        
+        if (reviews.length === 0) {
+            return res.status(404).json({ 
+                success: false,
+                error: 'Отзыв не найден' 
+            });
+        }
+        
+        await connection.execute(
+            'UPDATE reviews SET status = "rejected" WHERE id = ?',
+            [reviewId]
+        );
+        
+        await connection.execute(
+            'INSERT INTO review_moderation (review_id, moderator_id, status, moderation_comment, moderated_at) VALUES (?, ?, "rejected", ?, NOW())',
+            [reviewId, req.user.id, moderation_comment]
+        );
+        
+        console.log('Review rejected successfully');
+        
+        res.json({
+            success: true,
+            message: 'Отзыв отклонен'
+        });
+        
+    } catch (error) {
+        console.error('Reject review error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка отклонения отзыва'
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/admin/reviews/moderation/stats', authenticateToken, requireAdmin, async (req, res) => {
+    let connection;
+    try {
+        console.log('Admin fetching moderation stats');
+        
+        connection = await getConnection();
+        
+        const [stats] = await connection.execute(`
+            SELECT 
+                COUNT(*) as total_reviews,
+                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_reviews,
+                COUNT(CASE WHEN status = 'approved' THEN 1 END) as approved_reviews,
+                COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected_reviews
+            FROM reviews
+        `);
+        
+        console.log('Admin moderation stats:', stats[0]);
+        
+        res.json({
+            success: true,
+            data: stats[0]
+        });
+        
+    } catch (error) {
+        console.error('Admin get moderation stats error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Ошибка получения статистики модерации'
+        });
+    } finally {
+        if (connection) connection.release();
+    }
 });
 
 app.get('/api/test', (req, res) => {
@@ -3779,7 +4787,6 @@ app.get('/api/admin/diagnostics/brands', authenticateToken, requireAdmin, async 
     }
 });
 
-
 app.get('/api/debug/database-structure', authenticateToken, requireAdmin, async (req, res) => {
     let connection;
     try {
@@ -3827,7 +4834,6 @@ app.get('/api/debug/database-structure', authenticateToken, requireAdmin, async 
         });
     }
 });
-
 
 app.use(express.static(path.join(__dirname, '../frontend/dist'), {
     index: false
@@ -4096,6 +5102,135 @@ try {
         if (connection) {
             await connection.end();
         }
+    }
+}
+
+app.post('/api/auth/register', async (req, res) => {
+    let connection;
+    try {
+        const { email, phone, password, name } = req.body;
+        connection = await pool.getConnection();
+        
+        const [existing] = await connection.execute(
+            'SELECT id FROM users WHERE email = ?',
+            [email]
+        );
+        
+        if (existing.length > 0) {
+            connection.release();
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Пользователь с таким email уже существует' 
+            });
+        }
+        
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const verificationCode = generateVerificationCode();
+        const verificationCodeExpires = new Date(Date.now() + 10 * 60 * 1000); 
+        
+        const [result] = await connection.execute(
+            'INSERT INTO users (email, phone, password, name, verification_code, verification_code_expires) VALUES (?, ?, ?, ?, ?, ?)',
+            [email, phone, hashedPassword, name, verificationCode, verificationCodeExpires]
+        );
+
+        console.log('User registered with ID:', result.insertId);
+
+        try {
+            await sendVerificationCodeEmail({ email, name }, verificationCode);
+            console.log('Verification code sent to:', email);
+        } catch (emailError) {
+            console.error('Failed to send verification code:', emailError);
+        }
+
+        connection.release();
+        
+        res.json({ 
+            success: true,
+            message: 'Код подтверждения отправлен на ваш email',
+            data: {
+                email: email,
+                requiresVerification: true
+            }
+        });
+        
+    } catch (error) {
+        console.error('Registration error:', error);
+        if (connection) connection.release();
+        res.status(500).json({ 
+            success: false, 
+            error: 'Ошибка сервера' 
+        });
+    }
+}); 
+
+app.post('/api/auth/verify-email', async (req, res) => {
+    res.status(400).json({ 
+        success: false,
+        error: 'Используйте систему подтверждения с кодом. Запросите новый код.' 
+    });
+});
+
+app.post('/api/auth/resend-verification-email', async (req, res) => {
+    if (!req.user) {
+        return res.status(401).json({ error: 'Требуется авторизация' });
+    }
+
+    const connection = await pool.getConnection();
+    const [users] = await connection.execute(
+        'SELECT email, name FROM users WHERE id = ?',
+        [req.user.id]
+    );
+    
+    if (users.length === 0) {
+        connection.release();
+        return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+    
+    const user = users[0];
+    connection.release();
+
+    try {
+        const verificationCode = generateVerificationCode();
+        const verificationCodeExpires = new Date(Date.now() + 10 * 60 * 1000);
+        
+        await connection.execute(
+            'UPDATE users SET verification_code = ?, verification_code_expires = ? WHERE id = ?',
+            [verificationCode, verificationCodeExpires, req.user.id]
+        );
+        
+        await sendVerificationCodeEmail(user, verificationCode);
+        
+        res.json({ 
+            success: true,
+            message: 'Код подтверждения отправлен на ваш email'
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Ошибка отправки кода' });
+    }
+});
+
+async function startServer() {
+    try {
+        await initializeDatabase();
+        
+        const connection = await getConnection();
+        console.log(' База данных подключена');
+        connection.release();
+        
+        app.listen(PORT, () => {
+            console.log(` Russian Home Server запущен на порту ${PORT}`);
+            console.log(` API Gateway: http://localhost:${PORT}/api/homepage-data`);
+            console.log(` Catalog Service: http://localhost:${PORT}/api/catalog`);
+            console.log(` Auth Service: http://localhost:${PORT}/api/auth`);
+            console.log(` Order Service: http://localhost:${PORT}/api/orders`);
+            console.log('');
+            console.log(' Архитектура: API Gateway + Microservices');
+            console.log(' Система ролей: Админ, Менеджер, Пользователь');
+            console.log(' Оптимизация: Параллельные запросы + Асинхронная обработка');
+        });
+        
+    } catch (error) {
+        console.error(' Ошибка запуска сервера:', error);
     }
 }
 

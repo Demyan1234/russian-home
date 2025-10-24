@@ -1,20 +1,33 @@
 import { makeAutoObservable } from 'mobx'
 import { fetchProfile } from '../http/catalogAPI'
 import { userGetAll, userGetOne } from '../http/orderAPI' 
+import { userAPI } from '../http/userAPI'
 
 class UserStore {
     constructor() {
         this._isAuth = undefined
         this._isAdmin = false
+        this._isManager = false 
         this._user = {}
         this._loading = false
         this._userOrders = [] 
         this._selectedOrder = null
+        this._emailVerified = false 
         makeAutoObservable(this)
         
         this.checkAuth()
     }
-
+async checkEmailVerification() {
+    try {
+        const response = await authAPI.checkVerification();
+        this.setEmailVerified(response);
+        return response;
+    } catch (error) {
+        console.error('Email verification check failed:', error);
+        this.setEmailVerified(false);
+        return false;
+    }
+}
 async checkAuth() {
     if (this._loading) return;
     
@@ -35,6 +48,10 @@ async checkAuth() {
         
         console.log(' Server validation successful:', userData);
         this.login(userData, token);
+        
+        if (userData.email_verified !== undefined) {
+            this.setEmailVerified(userData.email_verified);
+        }
         
         return true;
         
@@ -57,7 +74,14 @@ async checkAuth() {
     }
 }
 
-    
+    setEmailVerified(verified) {
+        this._emailVerified = verified;
+    }
+
+    get emailVerified() {
+        return this._emailVerified;
+    }
+
     async loadUserOrders() {
         try {
             console.log(' Loading user orders...');
@@ -72,35 +96,21 @@ async checkAuth() {
         }
     }
 
-    async loadOrder(orderId) {
-        try {
-            console.log(' Loading order:', orderId);
-            const order = await userGetOne(orderId);
-            this.setSelectedOrder(order);
-            return order;
-        } catch (error) {
-            console.error(' Failed to load order:', error);
-            throw error;
-        }
-    }
-
-    addNewOrder(order) {
-        this._userOrders.unshift(order); 
-    }
-
     login(data, token = null) {
         console.log(' User login:', data);
         
         this._user = data;
         this._isAuth = true;
         this._isAdmin = data.role === 'admin';
+        this._isManager = data.role === 'manager'; 
+        this._emailVerified = data.email_verified || false; 
         
         if (token) {
             localStorage.setItem('token', token);
         }
         localStorage.setItem('user', JSON.stringify(this._user));
         
-        console.log(' Login successful, isAdmin:', this._isAdmin);
+        console.log(' Login successful, isAdmin:', this._isAdmin, 'isManager:', this._isManager, 'emailVerified:', this._emailVerified);
     }
 
     logout() {
@@ -108,9 +118,11 @@ async checkAuth() {
         
         this._isAuth = false;
         this._isAdmin = false;
+        this._isManager = false;
         this._user = {};
         this._userOrders = []; 
         this._selectedOrder = null;
+        this._emailVerified = false; 
         localStorage.removeItem('token');
         localStorage.removeItem('user');
     }
@@ -145,6 +157,10 @@ async checkAuth() {
 
     get selectedOrder() {
         return this._selectedOrder;
+    }
+
+    get isManager() {
+        return this._isManager;
     }
 }
 
